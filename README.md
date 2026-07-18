@@ -102,7 +102,7 @@ Driver taps "Address Unclear"
 │  │   dialect   │    │ • Fuzzy      │    │   auto-  │   │
 │  │ • Whisper   │    │ • OSM fallbk │    │   push   │   │
 │  │   ASR       │    │ • Ambiguity  │    │ • 50-75% │   │
-│  │ • Claude    │    │   detection  │    │   flag   │   │
+│  │ • Gemini    │    │   detection  │    │   flag   │   │
 │  │   extract   │    │ • Confidence │    │ • <50%   │   │
 │  └─────────────┘    │   scoring    │    │   retry  │   │
 │         ▲           └──────────────┘    └──────────┘   │
@@ -169,7 +169,7 @@ Driver's map pin updates. Delivery saved.
 │  • /api/health            — System status            │
 │                                                      │
 │  Integrations:                                       │
-│  • Claude API (Landmark extraction)                  │
+│  • Gemini API (Landmark extraction)                  │
 │  • Whisper (Speech → Text)                           │
 │  • OSM Nominatim (Geocoding fallback)                │
 │  • Twilio (Real phone calls, optional)               │
@@ -258,7 +258,7 @@ This forces a retry where the Voice Agent asks a more specific question.
 
 ### Layer 2: LLM Self-Confidence (New — Previously Unused)
  
-Claude now **reports its own extraction confidence** in the JSON response:
+Gemini now **reports its own extraction confidence** in the JSON response:
  
 | Hint | Value | When |
 |---|---|---|
@@ -313,7 +313,7 @@ START
 voice_agent
   • Call customer (Twilio or mock)
   • Whisper transcription
-  • Claude landmark extraction + hint
+  • Gemini landmark extraction + hint
   • Noise cleaning
   │
   ▼
@@ -346,7 +346,7 @@ sequenceDiagram
     actor Driver as Delivery Driver
     participant Frontend as Frontend (Browser)
     participant Backend as Backend (FastAPI)
-    participant Claude as Claude API
+    participant Gemini as Gemini API
     participant OSM as OpenStreetMap
     participant Whisper as Whisper (Local)
  
@@ -373,8 +373,8 @@ sequenceDiagram
     
     Backend->>Backend: Run LangGraph rescue
     Note over Backend: voice_agent: extract landmarks + hint
-    Backend->>Claude: Claude prompt: extract landmarks, directions, identifiers
-    Claude-->>Backend: {landmarks, directions, identifiers, confidence_hint}
+    Backend->>Gemini: Gemini prompt: extract landmarks, directions, identifiers
+    Gemini-->>Backend: {landmarks, directions, identifiers, confidence_hint}
     
     Note over Backend: spatial_agent: blend confidence
     Backend->>Backend: Fuzzy search landmarks.csv
@@ -397,8 +397,8 @@ sequenceDiagram
     Frontend->>Backend: POST /api/manual-rescue {transcript, pincode, city}
     
     Backend->>Backend: Run LangGraph (same agents, no call)
-    Backend->>Claude: Extract landmarks + hint
-    Claude-->>Backend: {landmarks, directions, identifiers, confidence_hint}
+    Backend->>Gemini: Extract landmarks + hint
+    Gemini-->>Backend: {landmarks, directions, identifiers, confidence_hint}
     Backend->>Backend: Fuzzy search + blend confidence
     Backend-->>Frontend: {steps, final}
     Frontend->>Frontend: Map + confidence updated
@@ -420,7 +420,7 @@ sequenceDiagram
     participant Twilio as Twilio
     participant Backend as Backend
     participant Whisper as Whisper Local Model
-    participant LLM as Claude API
+    participant LLM as Gemini API
  
     Speaker->>Twilio: Speaks address: "Panchayat bhawan ke peeche..."
     Twilio->>Twilio: Record audio (max 30s, auto-trim silence)
@@ -492,7 +492,7 @@ delivery-rescue/
 | 51–120 | Landmark loading | CSV → token index for fuzzy search |
 | 125–290 | `_fuzzy_ratio()` & `_local_search()` | Fuzzy matching + 3-layer confidence blend |
 | 295–325 | `RescueState` TypedDict | Shared state schema |
-| 327–495 | `voice_agent()` | Call, transcription, Claude extraction, confidence_hint |
+| 327–495 | `voice_agent()` | Call, transcription, Gemini extraction, confidence_hint |
 | 497–660 | `spatial_agent()` | Fuzzy search, ambiguity detection, blended confidence |
 | 662–750 | `route_agent()` | Threshold gates, push/flag/retry/escalate logic |
 | 752–800 | `/api/twilio/call` | Outbound Twilio call endpoint |
@@ -581,7 +581,7 @@ If 2+ results within 0.12 of each other → AMBIGUOUS → confidence *= 0.55
 | **FastAPI** | 0.115 | Web framework + WebSocket | Async-native, auto API docs, fastest Python web framework |
 | **LangGraph** | 0.2.28 | Multi-agent orchestration | State machine + conditional routing + loops — only framework that does this properly |
 | **langchain-core** | 0.3.8 | LangGraph dependency | Provides base types and utilities |
-| **Anthropic** | 0.34.2 | Claude API client | Claude Haiku is fast and cheap for landmark extraction |
+| **Google AI Stidio** | 1.30.0 | Gemini API client | Gemini Flash is fast and cheap for landmark extraction |
 | **httpx** | 0.27.2 | Async HTTP client | Used for OSM Nominatim requests |
 | **uvicorn** | 0.30.6 | ASGI server | Runs FastAPI, supports WebSocket natively |
 | **pydantic** | 2.9.2 | Data validation | FastAPI uses this internally; we use for request models |
@@ -604,7 +604,7 @@ If 2+ results within 0.12 of each other → AMBIGUOUS → confidence *= 0.55
 | **OpenStreetMap Nominatim** | Geocoding fallback | Free, no key needed |
 | **landmarks.csv** | Primary geocoding | Free, self-maintained |
 | **Census India 2011** | Coordinate verification source | Free public data |
-| **Claude API (Anthropic)** | Pay-as-you-go | Landmark extraction |
+| **Gemini API (Google AI Studio)** | Pay-as-you-go | Landmark extraction |
 
 ### Why LangGraph specifically?
 
@@ -650,15 +650,15 @@ venv\Scripts\activate           # Windows
 pip install -r requirements.txt
 ```
  
-### Step 3: Set Claude API Key
+### Step 3: Set Gemini API Key
  
 ```bash
-export ANTHROPIC_API_KEY=sk-ant-YOUR-KEY-HERE    # Mac/Linux
+export GEMINI_API_KEY=sk-ant-YOUR-KEY-HERE    # Mac/Linux
 # or
-set ANTHROPIC_API_KEY=sk-ant-YOUR-KEY-HERE       # Windows
+set GEMINI_API_KEY=sk-ant-YOUR-KEY-HERE       # Windows
 ```
  
-Get key at: https://console.anthropic.com → API Keys
+Get key at: https://aistudio.google.com/ → API Keys
  
 ### Step 4: Run Backend
  
@@ -692,7 +692,7 @@ Should return:
 {
   "status": "ok",
   "landmarks_loaded": 39,
-  "claude_key_set": true,
+  "gemini_key_set": true,
   "graph_nodes": ["voice_agent", "spatial_agent", "route_agent", "escalate"],
   "osm_enabled": true
 }
@@ -807,7 +807,7 @@ Response:
 {
   "status": "ok",
   "landmarks_loaded": 39,
-  "claude_key_set": true,
+  "gemini_key_set": true,
   "graph_nodes": ["voice_agent", "spatial_agent", "route_agent", "escalate"],
   "osm_enabled": true,
   "whisper_available": false

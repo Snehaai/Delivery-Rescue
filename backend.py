@@ -2,7 +2,7 @@
 =============================================================
   DELIVERY RESCUE BACKEND  —  Agentic AI Last-Mile System
 =============================================================
-  Stack  : FastAPI · LangGraph · Claude API · Whisper · OSM
+  Stack  : FastAPI · LangGraph · Gemini API · Whisper · OSM
   Author : Delivery Rescue Team
   
   HOW TO RUN  (copy-paste into terminal one line at a time)
@@ -10,7 +10,7 @@
   python -m venv venv
   source venv/bin/activate          # Windows: venv\Scripts\activate
   pip install -r requirements.txt
-  export ANTHROPIC_API_KEY=sk-ant-YOUR-KEY-HERE
+  export GEMINI_API_KEY=YOUR-KEY-HERE
   uvicorn backend:app --reload --port 8000
 =============================================================
 """
@@ -18,7 +18,7 @@
 # ──────────────────────────────────────────────────────────────
 #  STDLIB
 # ──────────────────────────────────────────────────────────────
-import os, csv, json, re, math, asyncio, tempfile, time, logging
+import os, csv, json, re, math, asyncio, tempfile, time, logging, difflib
 from pathlib import Path
 from typing import Optional, Literal, List
 
@@ -26,12 +26,20 @@ from typing import Optional, Literal, List
 #  THIRD-PARTY
 # ──────────────────────────────────────────────────────────────
 import httpx
-import anthropic
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, UploadFile, File, HTTPException
+from google.genai import types
+from google import genai
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, UploadFile, File, HTTPException, Request, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from typing_extensions import TypedDict
+
+# Load .env file automatically if present
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass   # python-dotenv not installed — use OS env vars directly
 
 # LangGraph
 from langgraph.graph import StateGraph, END
@@ -57,12 +65,16 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Claude client (lazy — only fails if key missing when called)
-def get_claude():
-    key = os.environ.get("ANTHROPIC_API_KEY", "")
+# Gemini client (lazy — only fails if key missing when called)
+def get_gemini():
+    key = os.getenv("GEMINI_API_KEY")
+
     if not key:
-        raise RuntimeError("ANTHROPIC_API_KEY env var not set. See README.")
-    return anthropic.Anthropic(api_key=key)
+        raise RuntimeError(
+            "GEMINI_API_KEY not found."
+        )
+
+    return genai.Client(api_key=key)
 
 # ──────────────────────────────────────────────────────────────
 #  LANDMARK DATABASE  (loaded from CSV at startup)
@@ -122,22 +134,54 @@ def _haversine(lat1, lng1, lat2, lng2) -> float:
     a = math.sin(d_lat/2)**2 + math.cos(math.radians(lat1))*math.cos(math.radians(lat2))*math.sin(d_lng/2)**2
     return R * 2 * math.atan2(math.sqrt(a), math.sqrt(1-a))
 
-def _local_search(landmarks: list[str], pincode: str, city: str) -> dict:
+_HINT_TO_NUMERIC = {"high": 0.90, "medium": 0.60, "low": 0.30}
+
+def _fuzzy_ratio(query_landmarks: list[str], row: dict) -> float:
+    """
+    Best fuzzy string similarity between any spoken landmark phrase and
+    this row's name/aliases, using difflib (stdlib — no extra dependency).
+    Catches spelling/transliteration drift ('mandhir' vs 'mandir', 'panchmukhi'
+    vs 'panchmuki') that exact token-overlap matching completely misses.
+    """
+    names = [row.get("landmark_name", ""), row.get("alias_1", ""), row.get("alias_2", "")]
+    names = [n.lower() for n in names if n]
+    best = 0.0
+    for lm in query_landmarks:
+        lm = lm.lower().strip()
+        if not lm:
+            continue
+        for n in names:
+            best = max(best, difflib.SequenceMatcher(None, lm, n).ratio())
+    return best
+
+def _local_search(landmarks: list[str], pincode: str, city: str,
+                   directions: list = None, identifiers: list = None,
+                   extraction_hint: str = "medium") -> dict:
     """
     Generic fuzzy-match against the landmark CSV.
     Returns the best match dict or {} with a confidence score.
 
     Scoring logic:
-      +0.35  exact landmark name token match
-      +0.20  alias match
+      +0.35  max(exact landmark-name token overlap, fuzzy string ratio)
+      +0.15  alias match
       +0.25  pincode matches
       +0.15  city/district matches
       -0.10  each ambiguity_note mention of 'multiple' or 'ambiguous'
-    
-    If multiple rows get the same score → ambiguity detected → confidence halved.
+
+    After the structural score is computed, it is blended with two signals
+    the LLM extraction step already produces but previously went unused:
+      - extraction_hint: Gemini's own "high/medium/low" self-assessment
+      - clue richness: how many directional/visual clues the customer gave
+        (more detail volunteered generally means a more reliable transcript)
+
+    If multiple rows get a close score → ambiguity detected → confidence halved
+    (this remains a safety brake, not a fix — see spatial_agent candidates list).
     """
     if not _landmark_index:
         return {}
+
+    directions = directions or []
+    identifiers = identifiers or []
 
     scored: list[tuple[float, dict]] = []
 
@@ -158,14 +202,18 @@ def _local_search(landmarks: list[str], pincode: str, city: str) -> dict:
 
         row_tokens = row["_tokens"]
         overlap = len(query_tokens & row_tokens)
-        if overlap == 0:
+        fuzzy = _fuzzy_ratio(landmarks, row)
+        if overlap == 0 and fuzzy < 0.55:
             continue
 
-        # Landmark name match
+        # Landmark name match — take whichever signal is stronger, exact
+        # token overlap or fuzzy string similarity, rather than requiring
+        # an exact match. Fixes false negatives from spelling variants.
         lm_name_tokens = set(re.split(r"[\s,/\-]+", row["landmark_name"].lower()))
         lm_overlap = len(query_tokens & lm_name_tokens)
-        if lm_overlap > 0:
-            score += 0.35 * (lm_overlap / max(len(lm_name_tokens), 1))
+        exact_component = 0.35 * (lm_overlap / max(len(lm_name_tokens), 1)) if lm_overlap else 0.0
+        fuzzy_component = 0.35 * fuzzy
+        score += max(exact_component, fuzzy_component)
 
         # Alias match
         for alias_col in ["alias_1", "alias_2"]:
@@ -198,13 +246,35 @@ def _local_search(landmarks: list[str], pincode: str, city: str) -> dict:
     scored.sort(key=lambda x: x[0], reverse=True)
     top_score, top_row = scored[0]
 
-    # Detect ambiguity: are there multiple rows with close scores?
+    # Detect ambiguity using the RAW structural scores, before any blending —
+    # ambiguity is a property of the data (multiple similarly-named places),
+    # not of how confident the LLM felt.
     close_matches = [s for s, _ in scored if s >= top_score - 0.12]
     ambiguous = len(close_matches) > 1
 
+    # Blend in the two previously-unused signals:
+    #   - Gemini's own confidence in what it extracted
+    #   - how much distinguishing detail the customer actually gave
+    hint_val = _HINT_TO_NUMERIC.get(extraction_hint, 0.6)
+    clue_bonus = min(0.02 * (len(directions) + len(identifiers)), 0.08)
+    top_score = 0.75 * top_score + 0.15 * hint_val + clue_bonus
+
+    candidates = []
     if ambiguous:
-        top_score *= 0.55   # halve confidence when ambiguous
+        top_score *= 0.55   # halve confidence when ambiguous — safety brake, not a fix
         log.info(f"Ambiguity detected: {len(close_matches)} close matches. Confidence halved.")
+        # Surface the actual candidates so the UI can plot all of them on the
+        # map and let the driver pick the right one visually, rather than the
+        # system silently guessing or making the customer repeat themselves.
+        candidates = [
+            {
+                "lat": row["lat"], "lng": row["lng"],
+                "display_name": f"{row['landmark_name']}, {row['city']}, {row['state']}",
+                "landmark_type": row.get("landmark_type", ""),
+                "raw_score": round(s, 3),
+            }
+            for s, row in scored if s >= scored[0][0] - 0.12
+        ][:4]
 
     return {
         "lat": top_row["lat"],
@@ -220,6 +290,7 @@ def _local_search(landmarks: list[str], pincode: str, city: str) -> dict:
         "confidence": round(min(top_score, 0.95), 3),
         "total_matches": len(scored),
         "ambiguous": ambiguous,
+        "candidates": candidates,
     }
 
 async def _osm_search(query: str, pincode: str = "", country: str = "in") -> dict:
@@ -289,6 +360,7 @@ class RescueState(TypedDict):
     extracted_directions:   list    # directional clues ("peeche", "baaju mein")
     extracted_identifiers:  list    # colour/visual clues ("neeli deewar")
     inferred_city:          str     # LLM's best guess of city from transcript
+    extraction_confidence_hint: str # LLM's own "high"/"medium"/"low" self-assessment
 
     # Spatial agent outputs
     geocode_result:         dict    # full geocode result
@@ -315,7 +387,7 @@ async def voice_agent(state: RescueState) -> dict:
     Responsibilities:
       1. Simulate / receive phone call result
       2. Detect and clean background noise from transcript
-      3. Use Claude to extract structured landmark info from natural speech
+      3. Use Gemini to extract structured landmark info from natural speech
       4. Handle fallback (WhatsApp) if call unanswered
       5. Guard against empty/too-short transcripts
     """
@@ -378,11 +450,11 @@ async def voice_agent(state: RescueState) -> dict:
         }
 
     updates["audio_transcript"] = transcript
-    updates["status_message"] = "🧠 Extracting landmarks with Claude AI..."
+    updates["status_message"] = "🧠 Extracting landmarks..."
 
-    # ── Claude LLM extraction ──────────────────────────────────
+    # ── Gemini LLM extraction ──────────────────────────────────
     try:
-        claude = get_claude()
+        client = get_gemini()
         prompt = f"""You are a delivery address intelligence agent for Indian e-commerce.
 A delivery partner is trying to reach a customer in a Tier 2/3 Indian city.
 The customer spoke in their local dialect (Hindi, Bhojpuri, Maithili, Awadhi, Marathi, Tamil, etc.)
@@ -411,12 +483,19 @@ Return ONLY a valid JSON object, no markdown, no explanation:
   "confidence_hint": "high/medium/low — your confidence in landmark extraction"
 }}"""
 
-        msg = claude.messages.create(
-            model="claude-haiku-4-5",
-            max_tokens=400,
-            messages=[{"role": "user", "content": prompt}],
-        )
-        raw_resp = msg.content[0].text.strip()
+        response = client.models.generate_content(
+            model="gemini-2.5-flash",
+            contents=prompt,
+            config= types.GenerateContentConfig(
+                response_mime_type="application/json"
+    ),
+)
+
+        raw_resp = response.text.strip()
+
+        raw_resp = raw_resp.replace("```json", "")
+        raw_resp = raw_resp.replace("```", "")
+        raw_resp = raw_resp.strip()
 
         # Strip markdown fences if present
         raw_resp = re.sub(r"^```(?:json)?\s*", "", raw_resp)
@@ -428,11 +507,13 @@ Return ONLY a valid JSON object, no markdown, no explanation:
         identifiers = extracted.get("identifiers", [])
         inf_city    = extracted.get("inferred_city", "")
         needs_clarif = extracted.get("clarification_needed", False)
+        conf_hint   = extracted.get("confidence_hint", "medium")
 
         updates["extracted_landmarks"]   = [l for l in landmarks if l]
         updates["extracted_directions"]  = directions
         updates["extracted_identifiers"] = identifiers
         updates["inferred_city"]         = inf_city or state.get("city_hint", "")
+        updates["extraction_confidence_hint"] = conf_hint
         updates["status_message"]        = (
             f"📍 Extracted: {', '.join(landmarks[:2]) or 'no clear landmark'}"
             + (f" | City inferred: {inf_city}" if inf_city else "")
@@ -443,7 +524,7 @@ Return ONLY a valid JSON object, no markdown, no explanation:
             # Flag for re-ask — orchestrator will loop back
             updates["status_message"] += f" — Will ask: '{extracted.get('clarification_question', '')}'"
 
-        log.info(f"[{state['order_id']}] LLM extraction OK: landmarks={landmarks}")
+        log.info(f"[{state['order_id']}] LLM extraction OK: landmarks={landmarks}, conf_hint={conf_hint}")
 
     except json.JSONDecodeError as e:
         log.warning(f"[{state['order_id']}] LLM JSON parse error: {e}. Using keyword fallback.")
@@ -463,6 +544,10 @@ Return ONLY a valid JSON object, no markdown, no explanation:
         updates["extracted_directions"]  = []
         updates["extracted_identifiers"] = []
         updates["inferred_city"]         = state.get("city_hint", "")
+        # No LLM judgement available — keyword matching is inherently less
+        # reliable than semantic extraction, so mark it "low" rather than
+        # silently inheriting whatever the previous turn's hint was.
+        updates["extraction_confidence_hint"] = "low"
         updates["status_message"]        = f"🔑 Keyword fallback used. Found: {found}"
         updates["error_log"]             = state["error_log"] + [f"LLM JSON error: {e}"]
 
@@ -472,6 +557,7 @@ Return ONLY a valid JSON object, no markdown, no explanation:
         updates["extracted_directions"]  = []
         updates["extracted_identifiers"] = []
         updates["inferred_city"]         = state.get("city_hint", "")
+        updates["extraction_confidence_hint"] = "low"
         updates["status_message"]        = f"⚠️ LLM unavailable — using raw transcript"
         updates["error_log"]             = state["error_log"] + [f"LLM error: {str(e)[:80]}"]
 
@@ -498,6 +584,9 @@ async def spatial_agent(state: RescueState) -> dict:
     city        = state.get("inferred_city", "") or state.get("city_hint", "")
     noise       = state.get("noise_detected", False)
     retry       = state["retry_count"]
+    directions  = state.get("extracted_directions", [])
+    identifiers = state.get("extracted_identifiers", [])
+    conf_hint   = state.get("extraction_confidence_hint", "medium")
 
     if not landmarks:
         return {
@@ -511,7 +600,7 @@ async def spatial_agent(state: RescueState) -> dict:
         }
 
     # ── Step 1: Local CSV search ────────────────────────────────
-    local_result = _local_search(landmarks, pincode, city)
+    local_result = _local_search(landmarks, pincode, city, directions, identifiers, conf_hint)
 
     if local_result and local_result.get("confidence", 0) >= 0.35:
         conf = local_result["confidence"]
@@ -801,6 +890,7 @@ async def rescue_ws(ws: WebSocket, order_id: str):
             "extracted_directions": [],
             "extracted_identifiers": [],
             "inferred_city":        "",
+            "extraction_confidence_hint": "medium",
             "geocode_result":       {},
             "confidence_score":     0.0,
             "confidence_reason":    "",
@@ -934,6 +1024,226 @@ async def mock_call(req: MockCallRequest):
     }
 
 # ──────────────────────────────────────────────────────────────
+#  SHARED HELPER — run the full LangGraph synchronously, keep trace
+# ──────────────────────────────────────────────────────────────
+async def _run_full_rescue(order_id: str, transcript: str, pincode: str = "",
+                            city_hint: str = "", call_answered: bool = True) -> dict:
+    """
+    Runs voice_agent -> spatial_agent -> route_agent (with internal
+    retry/escalate loop already wired into the graph) to completion.
+    Returns {"steps": [...], "final": {...}} — steps is the full
+    agent-by-agent trace, useful for showing "state handoff" in UI.
+    Used by both the Twilio recording callback and the manual/typed
+    address fallback, so both paths go through the identical agents.
+    """
+    initial: RescueState = {
+        "order_id": order_id, "raw_address": transcript, "pincode": pincode,
+        "city_hint": city_hint, "language": "auto", "call_answered": call_answered,
+        "fallback_triggered": False, "audio_transcript": transcript,
+        "noise_detected": False, "noise_cleaned": False, "extracted_landmarks": [],
+        "extracted_directions": [], "extracted_identifiers": [], "inferred_city": "",
+        "geocode_result": {}, "confidence_score": 0.0, "confidence_reason": "",
+        "ambiguity_detected": False, "candidate_count": 0, "final_gps": {},
+        "action_taken": "", "retry_count": 0, "status": "pending",
+        "status_message": "Rescue initiated...", "error_log": [],
+    }
+    steps = []
+    final_state = initial
+    async for step in rescue_graph.astream(initial):
+        for node_name, node_state in step.items():
+            steps.append({"node": node_name, "state": node_state})
+            final_state = {**final_state, **node_state}
+    return {"steps": steps, "final": final_state}
+
+# ──────────────────────────────────────────────────────────────
+#  REST: MANUAL RESCUE  (typed-address fallback when Twilio is unavailable)
+# ──────────────────────────────────────────────────────────────
+class ManualRescueRequest(BaseModel):
+    order_id:  str
+    transcript: str        # the address text driver typed/selected
+    pincode:   str = ""
+    city_hint: str = ""
+
+@app.post("/api/manual-rescue")
+async def manual_rescue(req: ManualRescueRequest):
+    """
+    Fallback path when Twilio calling isn't available/configured.
+    Feeds a typed address straight into the same agent graph used
+    by the real phone-call path, so the result is directly comparable.
+    """
+    result = await _run_full_rescue(req.order_id, req.transcript, req.pincode, req.city_hint)
+    return result
+
+# ──────────────────────────────────────────────────────────────
+#  TWILIO — real outbound call, recording, transcription, geocoding
+# ──────────────────────────────────────────────────────────────
+# In-memory store of call results, keyed by CallSid. A dict is fine for
+# a hackathon prototype — swap for Redis if this ever needs to survive
+# a backend restart or run across multiple workers.
+_twilio_results: dict[str, dict] = {}
+
+def _twilio_env_ok() -> bool:
+    return all(os.environ.get(k) for k in
+               ("TWILIO_ACCOUNT_SID", "TWILIO_AUTH_TOKEN", "TWILIO_PHONE_NUMBER", "PUBLIC_BASE_URL"))
+
+def _get_twilio_client():
+    from twilio.rest import Client
+    sid = os.environ["TWILIO_ACCOUNT_SID"]
+    token = os.environ["TWILIO_AUTH_TOKEN"]
+    return Client(sid, token)
+
+class TwilioCallRequest(BaseModel):
+    to:         str    # phone number to call, E.164 format e.g. +919876543210
+    order_id:   str
+    pincode:    str = ""
+    city_hint:  str = ""
+
+@app.get("/api/twilio/status")
+async def twilio_status():
+    """Lets the frontend show whether real calling is configured before showing the Call tab."""
+    return {"configured": _twilio_env_ok(),
+            "missing": [k for k in ("TWILIO_ACCOUNT_SID", "TWILIO_AUTH_TOKEN",
+                                     "TWILIO_PHONE_NUMBER", "PUBLIC_BASE_URL")
+                        if not os.environ.get(k)]}
+
+@app.post("/api/twilio/call")
+async def twilio_call(req: TwilioCallRequest):
+    """
+    Places a real outbound call via Twilio. Twilio requests TwiML from
+    /api/twilio/twiml when the call connects, which prompts and records
+    the response, then posts the recording to /api/twilio/recording-status.
+    """
+    if not _twilio_env_ok():
+        raise HTTPException(status_code=400, detail=(
+            "Twilio not configured. Set TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, "
+            "TWILIO_PHONE_NUMBER, and PUBLIC_BASE_URL (your ngrok https URL). See README."
+        ))
+    try:
+        client = _get_twilio_client()
+        base = os.environ["PUBLIC_BASE_URL"].rstrip("/")
+        call = client.calls.create(
+            to=req.to,
+            from_=os.environ["TWILIO_PHONE_NUMBER"],
+            url=f"{base}/api/twilio/twiml",
+            method="POST",
+            status_callback=f"{base}/api/twilio/call-status",
+            status_callback_event=["initiated", "ringing", "answered", "completed"],
+            status_callback_method="POST",
+        )
+        # Stash order context so the recording callback (which only gets
+        # CallSid, not order_id) can find its way back to the right order.
+        _twilio_results[call.sid] = {
+            "status": "calling", "order_id": req.order_id,
+            "pincode": req.pincode, "city_hint": req.city_hint,
+            "steps": [], "final": {},
+        }
+        log.info(f"[Twilio] Call placed: sid={call.sid} to={req.to}")
+        return {"call_sid": call.sid, "status": "calling"}
+    except Exception as e:
+        log.error(f"[Twilio] Call failed: {e}")
+        raise HTTPException(status_code=500, detail=f"Twilio call failed: {e}")
+
+@app.post("/api/twilio/twiml")
+async def twilio_twiml():
+    """
+    Twilio fetches this the moment the call is answered. Returns TwiML
+    telling Twilio to prompt and record. recordingStatusCallback fires
+    when the recording is ready, separately, async.
+    """
+    from fastapi.responses import Response
+    base = os.environ.get("PUBLIC_BASE_URL", "").rstrip("/")
+    twiml = f"""<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+  <Say language="hi-IN">Namaste. Kripya apna pura pata, landmark ke saath, batayein.</Say>
+  <Record maxLength="30" playBeep="true" trim="trim-silence"
+          recordingStatusCallback="{base}/api/twilio/recording-status"
+          recordingStatusCallbackMethod="POST" />
+  <Say language="hi-IN">Dhanyavaad. Aapka pata process ho raha hai.</Say>
+</Response>"""
+    return Response(content=twiml, media_type="application/xml")
+
+@app.post("/api/twilio/call-status")
+async def twilio_call_status(request: Request):
+    """Optional: Twilio posts call lifecycle events here (ringing/answered/completed)."""
+    form = await request.form()
+    call_sid = form.get("CallSid", "")
+    call_status = form.get("CallStatus", "")
+    if call_sid in _twilio_results:
+        _twilio_results[call_sid]["call_status"] = call_status
+    log.info(f"[Twilio] Call {call_sid} status: {call_status}")
+    return {"ok": True}
+
+@app.post("/api/twilio/recording-status")
+async def twilio_recording_status(request: Request, background_tasks: BackgroundTasks):
+    """
+    Twilio posts here once the recording is ready. We download the
+    audio, transcribe with Whisper, then run the full agent graph —
+    all in a background task so we can return 200 to Twilio immediately.
+    """
+    form = await request.form()
+    call_sid = form.get("CallSid", "")
+    recording_url = form.get("RecordingUrl", "")  # base URL, needs .wav/.mp3 suffix + auth
+
+    if not recording_url or call_sid not in _twilio_results:
+        return {"ok": True}  # ack anyway so Twilio doesn't retry forever
+
+    background_tasks.add_task(_process_twilio_recording, call_sid, recording_url)
+    return {"ok": True}
+
+async def _process_twilio_recording(call_sid: str, recording_url: str):
+    ctx = _twilio_results.get(call_sid, {})
+    ctx["status"] = "processing"
+    try:
+        sid = os.environ["TWILIO_ACCOUNT_SID"]
+        token = os.environ["TWILIO_AUTH_TOKEN"]
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await client.get(f"{recording_url}.wav", auth=(sid, token))
+            audio_bytes = resp.content
+
+        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
+            tmp.write(audio_bytes)
+            tmp_path = tmp.name
+
+        # Record + Whisper, not Twilio's built-in speech recognition —
+        # better accuracy on Hindi/Bhojpuri/Maithili per project requirements.
+        try:
+            import whisper
+            model = whisper.load_model("base")
+            result = model.transcribe(tmp_path, language=None, task="transcribe", fp16=False)
+            transcript = result["text"].strip()
+        except ImportError:
+            transcript = ""
+            log.warning("[Twilio] openai-whisper not installed — cannot transcribe real call audio.")
+        finally:
+            Path(tmp_path).unlink(missing_ok=True)
+
+        if not transcript:
+            ctx.update({"status": "error", "error": "Empty transcript — check Whisper install / call audio."})
+            return
+
+        run = await _run_full_rescue(
+            order_id=ctx.get("order_id", call_sid),
+            transcript=transcript,
+            pincode=ctx.get("pincode", ""),
+            city_hint=ctx.get("city_hint", ""),
+        )
+        ctx.update({"status": "done", "transcript": transcript, **run})
+        log.info(f"[Twilio] Call {call_sid} processed. Final status: {run['final'].get('status')}")
+
+    except Exception as e:
+        log.error(f"[Twilio] Processing failed for {call_sid}: {e}")
+        ctx.update({"status": "error", "error": str(e)})
+    finally:
+        _twilio_results[call_sid] = ctx
+
+@app.get("/api/twilio/result/{call_sid}")
+async def twilio_result(call_sid: str):
+    """Frontend polls this every ~1.5s after placing a call."""
+    if call_sid not in _twilio_results:
+        raise HTTPException(status_code=404, detail="Unknown call_sid")
+    return _twilio_results[call_sid]
+
+# ──────────────────────────────────────────────────────────────
 #  REST: GEOCODE DIRECT  (for testing spatial agent standalone)
 # ──────────────────────────────────────────────────────────────
 class GeocodeRequest(BaseModel):
@@ -966,7 +1276,7 @@ async def health():
     return {
         "status":            "ok",
         "landmarks_loaded":  len(_landmark_index),
-        "claude_key_set":    bool(os.environ.get("ANTHROPIC_API_KEY")),
+        "gemini_key_set":    bool(os.environ.get("GEMINI_API_KEY")),
         "graph_nodes":       ["voice_agent", "spatial_agent", "route_agent", "escalate"],
         "osm_enabled":       True,
         "whisper_available": _check_whisper(),
