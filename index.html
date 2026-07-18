@@ -1,0 +1,889 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Delivery Rescue — Meesho Agentic AI</title>
+<!-- Tailwind for utility classes used in component -->
+<script src="https://cdn.tailwindcss.com"></script>
+<!-- React 18 -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.development.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.development.js"></script>
+<!-- Babel to transform JSX in browser -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.5/babel.min.js"></script>
+<style>
+  body { margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", sans-serif; }
+  * { box-sizing: border-box; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .animate-spin { animation: spin 0.8s linear infinite; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel">
+const { useState, useEffect, useMemo, useRef } = React;
+ 
+const SCENARIOS = [
+  {
+    id: "ORD-4821",
+    customer: "Sunita Devi",
+    item: "Blue Cotton Saree",
+    price: 449,
+    address: "Panchayat bhawan ke peeche, teesra ghar, neeli deewar",
+    lang: "Bhojpuri",
+    type: "NORMAL",
+    stripe: "stripe-normal",
+    color: "#00A86B",
+    landmark: "Panchayat Bhawan, Ara",
+    gps: { lat: 25.5541, lng: 84.6698 },
+    mapId: "L1",
+    finalConfidence: 90,
+    escalate: false,
+    steps: [
+      { agent: "trigger", node: "trigger", label: "Order flagged \u2014 2 delivery attempts failed", t: "+0s" },
+      { agent: "voice", node: "voice", label: "\u{1F4DE} Calling +91-98\u2022\u2022\u2022\u202241 in Bhojpuri\u2026", t: "+3s" },
+      { agent: "voice", node: "voice", label: "Customer picked up. Recording landmarks\u2026", t: "+9s" },
+      { agent: "voice", node: "voice", label: 'Transcript: "panchayat bhawan ke peeche, neeli deewar"', t: "+18s" },
+      { agent: "spatial", node: "spatial", label: "Extracting landmarks \u2192 [panchayat bhawan, neeli deewar]", t: "+22s" },
+      { agent: "spatial", node: "spatial", label: "Geocoded to Panchayat Bhawan, Ara \u2192 25.5541, 84.6698", t: "+30s" },
+      { agent: "route", node: "route", label: "Confidence 90% \u2014 above auto-push threshold", t: "+38s" },
+      { agent: "route", node: "resolved", label: "\u2705 Pushed to rider app. Rescue complete.", t: "+42s" }
+    ],
+    state: {
+      voice_transcript: "panchayat bhawan ke peeche, neeli deewar",
+      extracted_landmarks: ["panchayat bhawan", "neeli deewar"],
+      confidence_score: 0.9,
+      final_gps: "25.5541,84.6698",
+      status: "AUTO_PUSHED"
+    }
+  },
+  {
+    id: "ORD-5503",
+    customer: "Ramesh Kumar",
+    item: "Men's Kurta Set",
+    price: 699,
+    address: "Hanuman mandir baaju mein, peela gate, second lane",
+    lang: "Hindi",
+    type: "NO ANSWER",
+    stripe: "stripe-noanswer",
+    color: "#FF8C00",
+    landmark: "Hanuman Mandir, Chhapra",
+    gps: { lat: 25.7809, lng: 84.747 },
+    mapId: "L2",
+    finalConfidence: 82,
+    escalate: false,
+    steps: [
+      { agent: "trigger", node: "trigger", label: "Order flagged \u2014 customer unreachable by rider", t: "+0s" },
+      { agent: "voice", node: "voice", label: "\u{1F4DE} Calling +91-97\u2022\u2022\u2022\u202202 in Hindi\u2026", t: "+3s" },
+      { agent: "voice", node: "voice", label: "No answer after 4 rings. Falling back to WhatsApp.", t: "+15s" },
+      { agent: "voice", node: "voice", label: "WhatsApp template sent \u2192 customer replied with landmark", t: "+40s" },
+      { agent: "spatial", node: "spatial", label: "Parsed reply: hanuman mandir, peela gate", t: "+48s" },
+      { agent: "spatial", node: "spatial", label: "Geocoded \u2192 Hanuman Mandir, Chhapra 25.7809, 84.7470", t: "+58s" },
+      { agent: "route", node: "route", label: "Confidence 82% \u2014 auto-push with note", t: "+66s" },
+      { agent: "route", node: "resolved", label: "\u2705 Pushed to rider with WA-verified flag.", t: "+70s" }
+    ],
+    state: {
+      voice_transcript: "[NO ANSWER \u2014 WA fallback]",
+      extracted_landmarks: ["hanuman mandir", "peela gate"],
+      confidence_score: 0.82,
+      final_gps: "25.7809,84.7470",
+      status: "AUTO_PUSHED_WA"
+    }
+  },
+  {
+    id: "ORD-6712",
+    customer: "Priya Singh",
+    item: "Kids School Bag",
+    price: 299,
+    address: "Primary school ke saamne, lal deewar wala ghar",
+    lang: "Awadhi",
+    type: "NOISY AUDIO",
+    stripe: "stripe-noise",
+    color: "#E53935",
+    landmark: "Govt Primary School, Faizabad",
+    gps: { lat: 26.7732, lng: 82.1391 },
+    mapId: "L3",
+    finalConfidence: 68,
+    escalate: false,
+    steps: [
+      { agent: "trigger", node: "trigger", label: "Order flagged \u2014 address ambiguous", t: "+0s" },
+      { agent: "voice", node: "voice", label: "\u{1F4DE} Calling +91-96\u2022\u2022\u2022\u202288 in Awadhi\u2026", t: "+3s" },
+      { agent: "voice", node: "voice", label: "Heavy background noise (traffic, market)", t: "+10s" },
+      { agent: "voice", node: "voice", label: "Noise-suppression + re-transcribe pass", t: "+20s" },
+      { agent: "voice", node: "voice", label: 'Transcript: "primary school ke saamne, lal deewar"', t: "+28s" },
+      { agent: "spatial", node: "spatial", label: "Extracted landmarks \u2192 capping confidence (audio quality)", t: "+34s" },
+      { agent: "spatial", node: "spatial", label: "Geocoded \u2192 Govt Primary School 26.7732, 82.1391", t: "+42s" },
+      { agent: "route", node: "route", label: "Confidence 68% \u2014 push with caution flag", t: "+50s" },
+      { agent: "route", node: "resolved", label: "\u26A0\uFE0F Pushed to rider with 'verify on arrival' flag.", t: "+54s" }
+    ],
+    state: {
+      voice_transcript: "primary school ke saamne, lal deewar",
+      extracted_landmarks: ["primary school", "lal deewar"],
+      confidence_score: 0.68,
+      final_gps: "26.7732,82.1391",
+      status: "FLAGGED_PUSH"
+    }
+  },
+  {
+    id: "ORD-7890",
+    customer: "Deepak Yadav",
+    item: "Pressure Cooker",
+    price: 889,
+    address: "koi mandir ke paas... ek dukaan bhi shayad",
+    lang: "Maithili",
+    type: "LOW CONFIDENCE",
+    stripe: "stripe-lowconf",
+    color: "#9B2FCB",
+    landmark: "Shiv Mandir, Darbhanga",
+    gps: { lat: 26.1542, lng: 85.8918 },
+    mapId: "L4",
+    finalConfidence: 65,
+    escalate: false,
+    steps: [
+      { agent: "trigger", node: "trigger", label: "Order flagged \u2014 vague landmark", t: "+0s" },
+      { agent: "voice", node: "voice", label: "\u{1F4DE} Calling +91-95\u2022\u2022\u2022\u202217 in Maithili\u2026", t: "+3s" },
+      { agent: "voice", node: "voice", label: 'Transcript: "koi mandir ke paas, ek dukaan bhi shayad"', t: "+16s" },
+      { agent: "spatial", node: "spatial", label: "First geocode attempt \u2192 42% confidence", t: "+24s" },
+      { agent: "route", node: "route", label: "Below threshold \u2014 looping back to Voice Agent", t: "+30s" },
+      { agent: "voice", node: "voice", label: "Re-prompted customer for nearest shop name", t: "+40s" },
+      { agent: "voice", node: "voice", label: 'New landmark: "sharma general store, shiv mandir"', t: "+48s" },
+      { agent: "spatial", node: "spatial", label: "Re-geocoded \u2192 Shiv Mandir, Darbhanga 26.1542, 85.8918", t: "+58s" },
+      { agent: "route", node: "route", label: "Confidence 65% \u2014 push with flag (2 iterations)", t: "+66s" },
+      { agent: "route", node: "resolved", label: "\u26A0\uFE0F Rescued after retry loop.", t: "+70s" }
+    ],
+    state: {
+      voice_transcript: "sharma general store, shiv mandir",
+      extracted_landmarks: ["shiv mandir", "sharma general store"],
+      confidence_score: 0.65,
+      final_gps: "26.1542,85.8918",
+      status: "FLAGGED_PUSH_RETRY",
+      iterations: 2
+    }
+  }
+];
+const MAP_LANDMARKS = [
+  { id: "L1", name: "Panchayat Bhawan, Ara", x: 22, y: 64 },
+  { id: "L2", name: "Hanuman Mandir, Chhapra", x: 34, y: 48 },
+  { id: "L3", name: "Govt Primary School, Faizabad", x: 60, y: 32 },
+  { id: "L4", name: "Shiv Mandir, Darbhanga", x: 74, y: 56 },
+  { id: "L5", name: "Bus Stand, Muzaffarpur", x: 58, y: 70 },
+  { id: "L6", name: "Rly Colony, Gorakhpur", x: 48, y: 22 },
+  { id: "L7", name: "Market Chowk, Motihari", x: 44, y: 80 },
+  { id: "L8", name: "Old Fort, Patna", x: 30, y: 78 }
+];
+const NODES = [
+  { id: "trigger", label: "Trigger", icon: "\u26A1", color: "#3B82F6", grad: "linear-gradient(135deg,#60A5FA,#3B82F6)" },
+  { id: "voice", label: "Voice Agent", icon: "\u{1F4DE}", color: "#9B2FCB", grad: "linear-gradient(135deg,#C084FC,#9B2FCB)" },
+  { id: "spatial", label: "Spatial Agent", icon: "\u{1F5FA}\uFE0F", color: "#F59E0B", grad: "linear-gradient(135deg,#FCD34D,#F59E0B)" },
+  { id: "route", label: "Route Agent", icon: "\u{1F9ED}", color: "#FF8C00", grad: "linear-gradient(135deg,#FDBA74,#FF8C00)" },
+  { id: "resolved", label: "Resolved", icon: "\u2705", color: "#00A86B", grad: "linear-gradient(135deg,#6EE7B7,#00A86B)" }
+];
+const AGENT_COLORS = {
+  trigger: "#3B82F6",
+  voice: "#9B2FCB",
+  spatial: "#F59E0B",
+  route: "#FF8C00",
+  resolved: "#00A86B",
+  escalate: "#E53935"
+};
+function DeliveryRescue() {
+  const [orders, setOrders] = useState(SCENARIOS.map((s) => ({ ...s, status: "pending" })));
+  const [selectedId, setSelectedId] = useState(SCENARIOS[0].id);
+  const [running, setRunning] = useState(false);
+  const [stepIdx, setStepIdx] = useState(-1);
+  const [logs, setLogs] = useState([]);
+  const [activeNode, setActiveNode] = useState(null);
+  const [completedNodes, setCompletedNodes] = useState(/* @__PURE__ */ new Set());
+  const [gpsConfirmed, setGpsConfirmed] = useState(false);
+  const [confidence, setConfidence] = useState(0);
+  const [stateFields, setStateFields] = useState({});
+  const [session, setSession] = useState({ rescued: 0, saved: 0, avg: 90 });
+  const [showJson, setShowJson] = useState(false);
+  const timers = useRef([]);
+  const logRef = useRef(null);
+  const selected = orders.find((o) => o.id === selectedId);
+  useEffect(() => {
+    return () => {
+      timers.current.forEach(clearTimeout);
+    };
+  }, []);
+  useEffect(() => {
+    if (logRef.current) logRef.current.scrollTop = logRef.current.scrollHeight;
+  }, [logs]);
+  const totals = useMemo(() => {
+    const rescued = orders.filter((o) => o.status === "rescued").length;
+    const pending = orders.filter((o) => o.status === "pending").length;
+    const escalated = orders.filter((o) => o.status === "escalated").length;
+    return { total: orders.length, rescued, pending, escalated };
+  }, [orders]);
+  function selectOrder(id) {
+    if (running) return;
+    setSelectedId(id);
+    resetRun();
+  }
+  function resetRun() {
+    timers.current.forEach(clearTimeout);
+    timers.current = [];
+    setStepIdx(-1);
+    setLogs([]);
+    setActiveNode(null);
+    setCompletedNodes(/* @__PURE__ */ new Set());
+    setGpsConfirmed(false);
+    setConfidence(0);
+    setStateFields({});
+  }
+  function resetAll() {
+    if (running) return;
+    resetRun();
+    setOrders(SCENARIOS.map((s) => ({ ...s, status: "pending" })));
+    setSession({ rescued: 0, saved: 0, avg: 90 });
+  }
+  function startRescue() {
+    if (running || !selected) return;
+    resetRun();
+    setRunning(true);
+    const steps = selected.steps;
+    let acc = 0;
+    steps.forEach((step, i) => {
+      const delay = 1e3 + Math.random() * 400;
+      acc += delay;
+      const t = window.setTimeout(() => {
+        setStepIdx(i);
+        setActiveNode(step.node);
+        setLogs((prev) => [...prev, { ...step, key: Date.now() + "-" + i }]);
+        setCompletedNodes((prev) => {
+          const nx = new Set(prev);
+          if (i > 0) nx.add(steps[i - 1].node);
+          return nx;
+        });
+        setStateFields((prev) => {
+          const nx = { ...prev };
+          if (step.agent === "voice") nx.voice_transcript = selected.state.voice_transcript;
+          if (step.agent === "spatial") nx.extracted_landmarks = selected.state.extracted_landmarks;
+          if (step.node === "spatial" && /Geocoded/.test(step.label)) {
+            nx.final_gps = selected.state.final_gps;
+            setGpsConfirmed(true);
+          }
+          if (step.agent === "route") {
+            nx.confidence_score = selected.finalConfidence / 100;
+            animateConfidence(selected.finalConfidence);
+          }
+          if (step.node === "resolved") nx.status = selected.state.status;
+          return nx;
+        });
+      }, acc);
+      timers.current.push(t);
+    });
+    const done = window.setTimeout(() => {
+      setCompletedNodes((prev) => {
+        const nx = new Set(prev);
+        steps.forEach((s) => nx.add(s.node));
+        return nx;
+      });
+      setActiveNode(null);
+      setRunning(false);
+      setOrders((prev) => prev.map((o) => o.id === selected.id ? { ...o, status: selected.escalate ? "escalated" : "rescued" } : o));
+      if (!selected.escalate) {
+        setSession((prev) => ({ rescued: prev.rescued + 1, saved: prev.saved + 180, avg: 90 }));
+      }
+    }, acc + 600);
+    timers.current.push(done);
+  }
+  function animateConfidence(target) {
+    let cur = 0;
+    const step = () => {
+      cur += Math.max(1, Math.round((target - cur) / 6));
+      if (cur >= target) {
+        setConfidence(target);
+        return;
+      }
+      setConfidence(cur);
+      const t = window.setTimeout(step, 40);
+      timers.current.push(t);
+    };
+    step();
+  }
+  return <>
+      <style>{`
+        :root{
+          --meesho-primary:#9B2FCB;
+          --meesho-pink:#F43397;
+          --meesho-bg:#F8F0FF;
+          --meesho-card:#FFFFFF;
+          --meesho-success:#00A86B;
+          --meesho-warn:#FF8C00;
+          --meesho-error:#E53935;
+          --meesho-text:#1A1A2E;
+          --meesho-muted:#6B7280;
+          --meesho-border:#E8D5F5;
+          --meesho-grad:linear-gradient(135deg,#9B2FCB,#F43397);
+        }
+        .meesho-bg{ background: var(--meesho-bg); color: var(--meesho-text); }
+        .meesho-grad{ background: var(--meesho-grad); }
+        .meesho-grad-text{ background: var(--meesho-grad); -webkit-background-clip:text; background-clip:text; color:transparent; }
+        .meesho-mono{ font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+        .meesho-lav-box{ background:#FBF5FF; border:1px solid var(--meesho-border); border-radius:10px; }
+        .meesho-card{ background:#fff; border:1px solid var(--meesho-border); border-radius:16px; box-shadow:0 4px 20px -12px rgba(155,47,203,.25); }
+        .selected-glow{ box-shadow:0 0 0 3px rgba(155,47,203,.18), 0 10px 30px -10px rgba(155,47,203,.45); border-color:var(--meesho-primary) !important; }
+        .hover-lift{ transition:transform .18s ease, box-shadow .18s ease; }
+        .hover-lift:hover{ transform:translateY(-2px); box-shadow:0 10px 25px -12px rgba(155,47,203,.35); }
+        .pulse-ring{ animation:pulseRing 1.4s cubic-bezier(.2,.6,.4,1) infinite; }
+        @keyframes pulseRing{ 0%{box-shadow:0 0 0 0 rgba(155,47,203,.55)} 70%{box-shadow:0 0 0 14px rgba(155,47,203,0)} 100%{box-shadow:0 0 0 0 rgba(155,47,203,0)} }
+        .dot-pulse{ animation:dotPulse 1.2s ease-in-out infinite; }
+        @keyframes dotPulse{ 0%,100%{opacity:.35} 50%{opacity:1} }
+        .flow-arrow{ position:relative; height:2px; background:#E5E7EB; flex:1; margin:0 6px; }
+        .flow-arrow.active{ background:linear-gradient(90deg,#9B2FCB,#F43397); animation:flowMove 1s linear infinite; }
+        .flow-arrow.active::after{ content:""; position:absolute; right:-6px; top:-4px; border-left:8px solid #F43397; border-top:5px solid transparent; border-bottom:5px solid transparent; }
+        .flow-arrow::after{ content:""; position:absolute; right:-6px; top:-4px; border-left:8px solid #E5E7EB; border-top:5px solid transparent; border-bottom:5px solid transparent; }
+        @keyframes flowMove{ 0%{background-position:0 0} 100%{background-position:20px 0} }
+        .fade-in{ animation:fadeIn .35s ease-out both; }
+        @keyframes fadeIn{ from{opacity:0; transform:translateY(4px)} to{opacity:1; transform:none} }
+        .count-up{ animation:pop .5s ease-out; }
+        @keyframes pop{ 0%{transform:scale(.85); opacity:.4} 100%{transform:scale(1); opacity:1} }
+        .pin-drop{ animation:pinDrop .9s cubic-bezier(.34,1.56,.64,1) both; }
+        @keyframes pinDrop{ 0%{transform:translate(-50%,-160%); opacity:0} 60%{transform:translate(-50%,-40%); opacity:1} 80%{transform:translate(-50%,-55%)} 100%{transform:translate(-50%,-50%)} }
+        .zone-pulse{ animation:zonePulse 1.4s ease-in-out infinite; }
+        @keyframes zonePulse{ 0%,100%{transform:scale(1); opacity:.85} 50%{transform:scale(1.15); opacity:.5} }
+        .chip-glass{ background:rgba(255,255,255,.18); backdrop-filter:blur(8px); border:1px solid rgba(255,255,255,.35); }
+        .stripe-normal{ border-left:5px solid var(--meesho-success); }
+        .stripe-noanswer{ border-left:5px solid var(--meesho-warn); }
+        .stripe-noise{ border-left:5px solid var(--meesho-error); }
+        .stripe-lowconf{ border-left:5px solid var(--meesho-primary); }
+        .scroll-thin::-webkit-scrollbar{ width:6px; height:6px }
+        .scroll-thin::-webkit-scrollbar-thumb{ background:#E8D5F5; border-radius:6px }
+        .code-block{ background:#1A1A2E; color:#F8F0FF; border-radius:12px; }
+        .k{ color:#C084FC } .v{ color:#F472B6 } .s{ color:#FBBF24 } .n{ color:#34D399 }
+      `}</style>
+      <div className="min-h-screen meesho-bg">
+        <Header totals={totals} />
+        <div
+    className="max-w-[1600px] mx-auto px-5 py-5 grid gap-5"
+    style={{ gridTemplateColumns: "300px minmax(0,1fr) 320px" }}
+  >
+          <LeftQueue orders={orders} selectedId={selectedId} onSelect={selectOrder} onReset={resetAll} running={running} />
+          <MiddleConsole
+    selected={selected}
+    running={running}
+    onStart={startRescue}
+    activeNode={activeNode}
+    completedNodes={completedNodes}
+    logs={logs}
+    stateFields={stateFields}
+  />
+          <RightPanel selected={selected} gpsConfirmed={gpsConfirmed} confidence={confidence} session={session} />
+        </div>
+        <div className="max-w-[1600px] mx-auto px-5 pb-8">
+          <JsonPanel selected={selected} logs={logs} open={showJson} onToggle={() => setShowJson((v) => !v)} />
+        </div>
+      </div>
+    </>;
+}
+function Header({ totals }) {
+  const chip = (label, val, dotColor) => <div className="chip-glass rounded-xl px-3 py-2 flex items-center gap-2 min-w-[110px]">
+      {dotColor && <span className="w-2 h-2 rounded-full" style={{ background: dotColor }} />}
+      <div className="text-white/80 text-[11px] leading-none">{label}</div>
+      <div className="text-white font-bold text-lg leading-none ml-auto">{val}</div>
+    </div>;
+  return <div className="meesho-grad w-full" style={{ boxShadow: "0 8px 24px -12px rgba(155,47,203,.45)" }}>
+      <div className="max-w-[1600px] mx-auto px-5 py-4 flex items-center gap-4">
+        <div className="w-10 h-10 rounded-xl bg-white flex items-center justify-center font-black text-xl meesho-grad-text">M</div>
+        <div className="text-white font-bold text-xl tracking-tight">Delivery Rescue</div>
+        <div className="chip-glass text-white text-[11px] font-semibold px-3 py-1 rounded-full">Powered by Agentic AI</div>
+        <div className="ml-auto flex gap-2">
+          {chip("Total Orders", totals.total)}
+          {chip("Rescued", totals.rescued, "#00A86B")}
+          {chip("Pending", totals.pending, "#FF8C00")}
+          {chip("Escalated", totals.escalated, "#E53935")}
+        </div>
+      </div>
+    </div>;
+}
+function LeftQueue({
+  orders,
+  selectedId,
+  onSelect,
+  onReset,
+  running
+}) {
+  return <div className="flex flex-col gap-3">
+      <div className="text-lg font-bold" style={{ color: "var(--meesho-primary)" }}>
+        Rescue Queue
+      </div>
+      <div className="flex flex-col gap-3">
+        {orders.map((o) => {
+    const sel = o.id === selectedId;
+    return <div
+      key={o.id}
+      onClick={() => onSelect(o.id)}
+      className={`meesho-card hover-lift cursor-pointer p-3 ${o.stripe} ${sel ? "selected-glow" : ""}`}
+    >
+              <div className="flex items-center justify-between">
+                <div className="text-xs font-bold" style={{ color: "var(--meesho-primary)" }}>
+                  {o.id}
+                </div>
+                <div
+      className="text-[10px] px-2 py-0.5 rounded-full font-semibold uppercase tracking-wide"
+      style={{ background: o.color + "22", color: o.color }}
+    >
+                  {o.type}
+                </div>
+              </div>
+              <div className="mt-1 font-semibold text-sm">{o.customer}</div>
+              <div className="text-xs" style={{ color: "var(--meesho-muted)" }}>
+                {o.item} · ₹{o.price}
+              </div>
+              <div className="meesho-lav-box meesho-mono text-[11px] px-2 py-1.5 mt-2 leading-snug">“{o.address}”</div>
+              <div className="flex items-center gap-2 mt-2">
+                <div
+      className="text-[10px] px-2 py-0.5 rounded-full font-medium"
+      style={{ background: "#F3E8FF", color: "var(--meesho-primary)" }}
+    >
+                  {o.lang}
+                </div>
+                {o.status === "rescued" && <div className="text-[10px] px-2 py-0.5 rounded-full font-semibold text-white" style={{ background: "var(--meesho-success)" }}>
+                    Rescued ✓
+                  </div>}
+                {o.status === "escalated" && <div className="text-[10px] px-2 py-0.5 rounded-full font-semibold text-white" style={{ background: "var(--meesho-error)" }}>
+                    Escalated
+                  </div>}
+              </div>
+            </div>;
+  })}
+      </div>
+      <button
+    onClick={onReset}
+    disabled={running}
+    className="mt-2 bg-white border-2 rounded-xl py-2 font-semibold text-sm disabled:opacity-50"
+    style={{ borderColor: "var(--meesho-primary)", color: "var(--meesho-primary)" }}
+  >
+        Reset All
+      </button>
+    </div>;
+}
+function MiddleConsole({
+  selected,
+  running,
+  onStart,
+  activeNode,
+  completedNodes,
+  logs,
+  stateFields
+}) {
+  if (!selected) return null;
+  return <div className="flex flex-col gap-4 min-w-0">
+      <div className="meesho-card overflow-hidden">
+        <div className="meesho-grad px-4 py-3 flex items-center justify-between">
+          <div>
+            <div className="text-white/80 text-[11px] uppercase tracking-wider">{selected.id}</div>
+            <div className="text-white font-bold text-lg">
+              {selected.customer} · {selected.item}
+            </div>
+          </div>
+          <div className="text-white font-semibold">₹{selected.price}</div>
+        </div>
+        <div className="p-4 flex items-center gap-4">
+          <div className="flex-1">
+            <div className="text-[11px] font-semibold uppercase tracking-wider" style={{ color: "var(--meesho-muted)" }}>
+              Raw Address
+            </div>
+            <div className="meesho-lav-box meesho-mono text-sm px-3 py-2 mt-1">“{selected.address}”</div>
+            <div className="mt-2 text-xs" style={{ color: "var(--meesho-muted)" }}>
+              Language: <span className="font-semibold" style={{ color: "var(--meesho-primary)" }}>{selected.lang}</span> · Scenario:{" "}
+              <span className="font-semibold" style={{ color: selected.color }}>
+                {selected.type}
+              </span>
+            </div>
+          </div>
+          <button
+    onClick={onStart}
+    disabled={running}
+    className="meesho-grad text-white font-bold px-6 py-3 rounded-xl shadow-lg disabled:opacity-70 flex items-center gap-2 whitespace-nowrap"
+    style={{ boxShadow: "0 10px 24px -8px rgba(155,47,203,.55)" }}
+  >
+            {running ? <>
+                <Spinner /> Rescuing...
+              </> : <>Start Rescue →</>}
+          </button>
+        </div>
+      </div>
+ 
+      <div
+    className="rounded-2xl p-4 flex items-start gap-3"
+    style={{ background: selected.color + "14", border: "1px solid " + selected.color + "55" }}
+  >
+        <div className="text-2xl">
+          {selected.type === "NORMAL" ? "\u2705" : selected.type === "NO ANSWER" ? "\u{1F4F5}" : selected.type === "NOISY AUDIO" ? "\u{1F3A7}" : "\u{1F501}"}
+        </div>
+        <div className="flex-1">
+          <div className="font-bold" style={{ color: selected.color }}>
+            {selected.type}
+          </div>
+          <div className="text-sm" style={{ color: "var(--meesho-text)" }}>
+            {selected.type === "NORMAL" && "Clean call, clear landmarks \u2014 auto-push to rider."}
+            {selected.type === "NO ANSWER" && "Call fails \u2192 WhatsApp fallback \u2192 customer replies \u2192 resume."}
+            {selected.type === "NOISY AUDIO" && "Background noise suppressed, transcript recovered, confidence capped."}
+            {selected.type === "LOW CONFIDENCE" && "Vague answer \u2192 orchestrator loops back for a second Voice Agent pass."}
+          </div>
+          <StepFlow selected={selected} />
+        </div>
+      </div>
+ 
+      <div className="meesho-card">
+        <div className="meesho-grad px-4 py-3 rounded-t-2xl text-white font-bold">Agent Orchestration — Live Execution</div>
+        <div className="p-5">
+          <GraphNodes activeNode={activeNode} completedNodes={completedNodes} escalated={false} />
+          <StateHandoff stateFields={stateFields} />
+        </div>
+      </div>
+ 
+      <div className="meesho-card p-4">
+        <div className="font-bold mb-2" style={{ color: "var(--meesho-primary)" }}>
+          Agent Activity Log
+        </div>
+        <div className="max-h-[220px] overflow-auto scroll-thin pr-2">
+          <ActivityLog logs={logs} />
+        </div>
+      </div>
+    </div>;
+}
+function StepFlow({ selected }) {
+  const pillsByType = {
+    NORMAL: ["\u{1F4DE} Call", "\u{1F4DD} Transcribe", "\u{1F5FA}\uFE0F Geocode", "\u2705 Push"],
+    "NO ANSWER": ["\u{1F4DE} Call", "\u{1F4F5} No answer", "\u{1F4AC} WhatsApp", "\u{1F5FA}\uFE0F Geocode", "\u2705 Push"],
+    "NOISY AUDIO": ["\u{1F4DE} Call", "\u{1F3A7} Denoise", "\u{1F4DD} Retry transcribe", "\u{1F5FA}\uFE0F Geocode", "\u26A0\uFE0F Push"],
+    "LOW CONFIDENCE": ["\u{1F4DE} Call", "\u{1F5FA}\uFE0F Low score", "\u{1F501} Loop back", "\u{1F4DE} Re-ask", "\u{1F5FA}\uFE0F Geocode", "\u26A0\uFE0F Push"]
+  };
+  const pills = pillsByType[selected.type];
+  return <div className="flex items-center flex-wrap gap-2 mt-3">
+      {pills.map((p, i) => <span key={i}>
+          <div
+    className="text-[11px] font-semibold px-2.5 py-1 rounded-full"
+    style={{ background: "#fff", color: selected.color, border: "1px solid " + selected.color + "66" }}
+  >
+            {p}
+          </div>
+          {i < pills.length - 1 && <span style={{ color: selected.color }}>→</span>}
+        </span>)}
+    </div>;
+}
+function GraphNodes({ activeNode, completedNodes }) {
+  return <div>
+      <div className="flex items-stretch">
+        {NODES.map((n, i) => <span key={n.id} className="contents">
+            <GraphNode node={n} active={activeNode === n.id} completed={completedNodes.has(n.id)} />
+            {i < NODES.length - 1 && <div className="flex items-center flex-1">
+                <div className={`flow-arrow ${completedNodes.has(n.id) ? "active" : ""}`} />
+              </div>}
+          </span>)}
+      </div>
+    </div>;
+}
+function GraphNode({ node, active, completed }) {
+  const bg = active || completed ? node.grad : "#fff";
+  const color = active || completed ? "#fff" : node.color;
+  return <div className="flex flex-col items-center min-w-[86px]">
+      <div
+    className={`w-16 h-16 rounded-2xl flex items-center justify-center text-2xl relative ${active ? "pulse-ring" : ""}`}
+    style={{ background: bg, border: "2px solid " + node.color, color }}
+  >
+        {completed && !active ? <span className="text-white text-xl font-black">✓</span> : node.icon}
+      </div>
+      <div className="mt-2 text-[11px] font-semibold" style={{ color: node.color }}>
+        {node.label}
+      </div>
+    </div>;
+}
+function StateHandoff({ stateFields }) {
+  const entries = Object.entries(stateFields);
+  return <div className="mt-5 meesho-lav-box p-3">
+      <div className="text-[10px] uppercase tracking-widest font-bold mb-1" style={{ color: "var(--meesho-primary)" }}>
+        State handoff
+      </div>
+      <div className="flex gap-2 overflow-x-auto scroll-thin">
+        {entries.length === 0 && <div className="text-xs" style={{ color: "var(--meesho-muted)" }}>waiting for agents…</div>}
+        {entries.map(([k, v]) => <div key={k} className="fade-in bg-white rounded-lg px-2.5 py-1.5 border" style={{ borderColor: "var(--meesho-border)", minWidth: 180 }}>
+            <div className="text-[10px] font-bold" style={{ color: "var(--meesho-primary)" }}>
+              {k}
+            </div>
+            <div className="meesho-mono text-[11px] truncate" style={{ color: "var(--meesho-text)" }}>
+              {Array.isArray(v) ? v.join(", ") : String(v)}
+            </div>
+          </div>)}
+      </div>
+    </div>;
+}
+function ActivityLog({ logs }) {
+  if (logs.length === 0) return <div className="text-sm" style={{ color: "var(--meesho-muted)" }}>No activity yet. Click Start Rescue to begin.</div>;
+  return <ol className="relative border-l-2 pl-4 space-y-3" style={{ borderColor: "var(--meesho-border)" }}>
+      {logs.map((l) => <li key={l.key} className="fade-in relative">
+          <span
+    className="absolute -left-[22px] top-1 w-3 h-3 rounded-full border-2 border-white"
+    style={{ background: AGENT_COLORS[l.agent] || "#9B2FCB", boxShadow: "0 0 0 2px " + (AGENT_COLORS[l.agent] || "#9B2FCB") + "55" }}
+  />
+          <div className="flex items-center gap-2">
+            <span className="text-[10px] meesho-mono" style={{ color: "var(--meesho-muted)" }}>
+              {l.t}
+            </span>
+            <span className="text-[10px] uppercase tracking-wider font-bold" style={{ color: AGENT_COLORS[l.agent] }}>
+              {l.agent}
+            </span>
+          </div>
+          <div className="text-sm">{l.label}</div>
+        </li>)}
+    </ol>;
+}
+function Spinner() {
+  return <span className="inline-block w-4 h-4 rounded-full border-2 border-white/40 border-t-white animate-spin" />;
+}
+function RightPanel({
+  selected,
+  gpsConfirmed,
+  confidence,
+  session
+}) {
+  return <div className="flex flex-col gap-4">
+      <MapCard selected={selected} gpsConfirmed={gpsConfirmed} />
+      <ConfidenceCard value={confidence} />
+      <ImpactCard session={session} />
+    </div>;
+}
+function MapCard({ selected, gpsConfirmed }) {
+  const selectedLandmark = selected ? MAP_LANDMARKS.find((m) => m.id === selected.mapId) : void 0;
+  return <div className="meesho-card p-4">
+      <div className="font-bold mb-2" style={{ color: "var(--meesho-primary)" }}>
+        Live Geocoding Map
+      </div>
+      <div
+    className="relative rounded-xl overflow-hidden"
+    style={{ height: 220, background: "linear-gradient(135deg,#F3E8FF,#FBF5FF)", border: "1px solid var(--meesho-border)" }}
+  >
+        <svg viewBox="0 0 100 100" preserveAspectRatio="none" className="absolute inset-0 w-full h-full opacity-40">
+          <path
+    d="M8,60 Q20,30 45,25 T92,40 Q90,75 60,88 T15,80 Z"
+    fill="none"
+    stroke="#9B2FCB"
+    strokeWidth="0.4"
+    strokeDasharray="1.2,1"
+  />
+        </svg>
+        {MAP_LANDMARKS.map((l) => {
+    const isTarget = selected && selected.mapId === l.id;
+    const grown = isTarget && gpsConfirmed;
+    return <div key={l.id} className="absolute" style={{ left: l.x + "%", top: l.y + "%", transform: "translate(-50%,-50%)" }}>
+              <div
+      className="rounded-full"
+      style={{
+        width: grown ? 18 : 8,
+        height: grown ? 18 : 8,
+        background: grown ? "radial-gradient(circle,#F472B6,#9B2FCB)" : "#E8D5F5",
+        boxShadow: grown ? "0 0 0 6px rgba(155,47,203,.25)" : "none",
+        transition: "all .5s ease"
+      }}
+    />
+            </div>;
+  })}
+        {selected && !gpsConfirmed && selectedLandmark && <div className="absolute" style={{ left: selectedLandmark.x + "%", top: selectedLandmark.y + "%", transform: "translate(-50%,-50%)" }}>
+            <div
+    className="zone-pulse rounded-full"
+    style={{ width: 60, height: 60, border: "2px dashed #E53935", background: "rgba(229,57,53,.12)" }}
+  />
+            <div
+    className="absolute top-full mt-1 left-1/2 -translate-x-1/2 text-[10px] font-bold whitespace-nowrap"
+    style={{ color: "#E53935" }}
+  >
+              Unresolved zone
+            </div>
+          </div>}
+        {selected && gpsConfirmed && selectedLandmark && <>
+            <div className="absolute pin-drop text-2xl" style={{ left: selectedLandmark.x + "%", top: selectedLandmark.y + "%" }}>
+              📍
+            </div>
+            <div
+    className="absolute bg-white shadow-md rounded-lg px-2 py-1 text-[11px] font-semibold fade-in"
+    style={{
+      left: selectedLandmark.x + "%",
+      top: selectedLandmark.y - 14 + "%",
+      transform: "translate(-50%,-100%)",
+      border: "1px solid var(--meesho-border)"
+    }}
+  >
+              {selected.landmark}
+              <div className="meesho-mono text-[10px]" style={{ color: "var(--meesho-muted)" }}>
+                {selected.gps.lat}, {selected.gps.lng}
+              </div>
+            </div>
+          </>}
+      </div>
+      <div className="flex gap-2 mt-3">
+        <div className="flex-1 meesho-lav-box text-center py-1.5 meesho-mono text-xs">
+          lat: <span className="font-bold" style={{ color: "var(--meesho-primary)" }}>{gpsConfirmed && selected ? selected.gps.lat : "\u2014"}</span>
+        </div>
+        <div className="flex-1 meesho-lav-box text-center py-1.5 meesho-mono text-xs">
+          lng: <span className="font-bold" style={{ color: "var(--meesho-primary)" }}>{gpsConfirmed && selected ? selected.gps.lng : "\u2014"}</span>
+        </div>
+      </div>
+    </div>;
+}
+function ConfidenceCard({ value }) {
+  const pct = value / 100;
+  const sweep = 240;
+  const angle = -120 + sweep * pct;
+  const r = 60, cx = 80, cy = 80;
+  const start = polar(cx, cy, r, -120);
+  const end = polar(cx, cy, r, angle);
+  const large = sweep * pct > 180 ? 1 : 0;
+  const path = value > 0 ? `M ${start.x} ${start.y} A ${r} ${r} 0 ${large} 1 ${end.x} ${end.y}` : "";
+  const zone = value < 50 ? "escalate" : value < 75 ? "flag" : "push";
+  const color = value < 50 ? "#E53935" : value < 75 ? "#FF8C00" : "#00A86B";
+  return <div className="meesho-card p-4">
+      <div className="font-bold mb-2" style={{ color: "var(--meesho-primary)" }}>
+        Confidence Score
+      </div>
+      <div className="relative flex justify-center">
+        <svg width="160" height="120" viewBox="0 0 160 120">
+          <defs>
+            <linearGradient id="arcGrad" x1="0" x2="1">
+              <stop offset="0%" stopColor="#E53935" />
+              <stop offset="50%" stopColor="#FF8C00" />
+              <stop offset="100%" stopColor="#00A86B" />
+            </linearGradient>
+          </defs>
+          <path
+    d={`M ${polar(cx, cy, r, -120).x} ${polar(cx, cy, r, -120).y} A ${r} ${r} 0 1 1 ${polar(cx, cy, r, 120).x} ${polar(cx, cy, r, 120).y}`}
+    fill="none"
+    stroke="#F1E5FA"
+    strokeWidth="14"
+    strokeLinecap="round"
+  />
+          {value > 0 && <path d={path} fill="none" stroke="url(#arcGrad)" strokeWidth="14" strokeLinecap="round" />}
+        </svg>
+        <div className="absolute inset-0 flex flex-col items-center justify-center">
+          <div className="text-3xl font-black" style={{ color }}>
+            {value}%
+          </div>
+          <div className="text-[10px] uppercase font-bold tracking-widest" style={{ color: "var(--meesho-muted)" }}>
+            confidence
+          </div>
+        </div>
+      </div>
+      <div className="grid grid-cols-3 gap-1 mt-2 text-[10px] font-semibold text-center">
+        <div className="rounded-md py-1" style={{ background: zone === "escalate" ? "#E5393522" : "#FAFAFA", color: "#E53935" }}>
+          Escalate &lt;50%
+        </div>
+        <div className="rounded-md py-1" style={{ background: zone === "flag" ? "#FF8C0022" : "#FAFAFA", color: "#FF8C00" }}>
+          Flag 50-75%
+        </div>
+        <div className="rounded-md py-1" style={{ background: zone === "push" ? "#00A86B22" : "#FAFAFA", color: "#00A86B" }}>
+          Auto-push ≥75%
+        </div>
+      </div>
+    </div>;
+}
+function polar(cx, cy, r, deg) {
+  const rad = (deg - 90) * Math.PI / 180;
+  return { x: cx + r * Math.cos(rad), y: cy + r * Math.sin(rad) };
+}
+function ImpactCard({ session }) {
+  return <div className="meesho-card overflow-hidden">
+      <div className="p-4" style={{ background: "linear-gradient(135deg,#F3E8FF,#FFFFFF)" }}>
+        <div className="font-bold" style={{ color: "var(--meesho-primary)" }}>
+          Session Impact
+        </div>
+      </div>
+      <div className="p-4 grid grid-cols-3 gap-3 text-center">
+        <div>
+          <div key={"r" + session.rescued} className="count-up text-2xl font-black" style={{ color: "var(--meesho-success)" }}>
+            {session.rescued}
+          </div>
+          <div className="text-[10px] uppercase font-semibold" style={{ color: "var(--meesho-muted)" }}>
+            Rescued
+          </div>
+        </div>
+        <div>
+          <div key={"s" + session.saved} className="count-up text-2xl font-black" style={{ color: "var(--meesho-primary)" }}>
+            ₹{session.saved}
+          </div>
+          <div className="text-[10px] uppercase font-semibold" style={{ color: "var(--meesho-muted)" }}>
+            Cost Saved
+          </div>
+        </div>
+        <div>
+          <div className="text-2xl font-black" style={{ color: "var(--meesho-pink)" }}>
+            ~{session.avg}s
+          </div>
+          <div className="text-[10px] uppercase font-semibold" style={{ color: "var(--meesho-muted)" }}>
+            Avg Time
+          </div>
+        </div>
+      </div>
+    </div>;
+}
+function JsonPanel({
+  selected,
+  logs,
+  open,
+  onToggle
+}) {
+  const stepsByAgent = ["voice", "spatial", "route"];
+  const buildState = (agent) => {
+    if (!selected) return {};
+    if (agent === "voice") return { voice_transcript: selected.state.voice_transcript, language: selected.lang };
+    if (agent === "spatial") return { extracted_landmarks: selected.state.extracted_landmarks, candidate_gps: selected.state.final_gps };
+    if (agent === "route") return { confidence_score: selected.state.confidence_score, status: selected.state.status, ...selected.state.iterations ? { iterations: selected.state.iterations } : {} };
+    return {};
+  };
+  return <div className="meesho-card">
+      <button onClick={onToggle} className="w-full flex items-center gap-2 px-4 py-3">
+        <span className="font-bold" style={{ color: "var(--meesho-primary)" }}>
+          Request / Response Flow
+        </span>
+        <span className="text-xs" style={{ color: "var(--meesho-muted)" }}>
+          JSON state passed between agents
+        </span>
+        <span className="ml-auto text-xl transition-transform" style={{ color: "var(--meesho-primary)", transform: open ? "rotate(90deg)" : "none" }}>
+          ›
+        </span>
+      </button>
+      {open && <div className="p-4 pt-0 grid md:grid-cols-3 gap-3">
+          {stepsByAgent.map((a) => <div key={a}>
+              <div
+    className="inline-block text-[11px] font-bold uppercase tracking-wider px-2 py-1 rounded-full text-white mb-2"
+    style={{ background: AGENT_COLORS[a] }}
+  >
+                {a} agent
+              </div>
+              <pre className="code-block p-3 text-[11px] meesho-mono overflow-auto">{prettyJson(buildState(a))}</pre>
+            </div>)}
+        </div>}
+    </div>;
+}
+function prettyJson(obj) {
+  const j = JSON.stringify(obj, null, 2);
+  const parts = [];
+  j.split("\n").forEach((line, i) => {
+    const m = line.match(/^(\s*)"([^"]+)":\s*(.*)$/);
+    if (m) {
+      const val = m[3];
+      let cls = "v";
+      if (/^\d/.test(val)) cls = "n";
+      if (/^\[/.test(val)) cls = "s";
+      parts.push(
+        <div key={i}>
+          {m[1]}
+          <span className="k">"{m[2]}"</span>: <span className={cls}>{val}</span>
+        </div>
+      );
+    } else {
+      parts.push(<div key={i}>{line}</div>);
+    }
+  });
+  return parts;
+}
+// DeliveryRescue is globally available
+ 
+// Mount the app
+const root = ReactDOM.createRoot(document.getElementById("root"));
+root.render(<DeliveryRescue />);
+</script>
+</body>
+</html>
