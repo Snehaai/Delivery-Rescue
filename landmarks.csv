@@ -1,0 +1,40 @@
+landmark_name,alias_1,alias_2,city,district,state,pincode,lat,lng,landmark_type,ambiguity_note
+Hanuman Mandir,Bajrang Bali Mandir,Sankat Mochan,Patna,Patna,Bihar,800001,25.5941,85.1376,temple,Multiple Hanuman Mandirs in Patna — this is near GPO
+Hanuman Mandir,Hanuman Temple,Bajrangbali Temple,Muzaffarpur,Muzaffarpur,Bihar,842001,26.1197,85.3910,temple,Different from Patna — near Bus Stand Muzaffarpur
+Hanuman Mandir,Panchmukhi Hanuman,Hanuman Ji Mandir,Darbhanga,Darbhanga,Bihar,846004,26.1542,85.8918,temple,Near Railway Station Darbhanga — 3rd Hanuman Mandir in Bihar
+Hanuman Mandir,Balaji Mandir,Maruti Mandir,Gorakhpur,Gorakhpur,Uttar Pradesh,273001,26.7606,83.3732,temple,Gorakhpur has 4 temples locally called Hanuman Mandir
+Hanuman Mandir,Sankat Mochan Mandir,,Varanasi,Varanasi,Uttar Pradesh,221001,25.3176,82.9739,temple,Famous one near Assi Ghat — but 6 others exist in city
+Shiv Mandir,Shiva Temple,Mahadev Mandir,Ara,Bhojpur,Bihar,802301,25.5565,84.6637,temple,Near Civil Court Ara — not the one near station
+Shiv Mandir,Bholenath Mandir,Shivala,Chapra,Saran,Bihar,841301,25.7820,84.7464,temple,Chapra has 3 Shiv Mandirs in 2km radius
+Kirana Store,Ramu Bhaiya Ki Dukan,General Store,Vaishali,Vaishali,Bihar,844111,25.6928,85.1369,shop,Generic name — 50+ kirana stores in Vaishali town
+Kirana Store,Sharma General Store,Ratan Medicos,Sitamarhi,Sitamarhi,Bihar,843302,26.5920,85.4900,shop,Asked to clarify — which kirana near which landmark
+Panchayat Bhawan,Block Office,Gram Panchayat,Muzaffarpur,Muzaffarpur,Bihar,842002,26.1180,85.3880,government,Each block has own Panchayat Bhawan — need ward/village name
+Panchayat Bhawan,Mukhiya Office,Panchayat Karyalay,Darbhanga,Darbhanga,Bihar,846001,26.1600,85.8800,government,District has 18 panchayat bhawans — pincode alone insufficient
+Bus Stand,BSRTC Bus Station,Old Bus Adda,Muzaffarpur,Muzaffarpur,Bihar,842001,26.1220,85.3630,transport,Old vs New Bus Stand — 3km apart — need clarification
+Bus Stand,Roadways Bus Stand,Purana Bus Adda,Gorakhpur,Gorakhpur,Uttar Pradesh,273001,26.7553,83.3740,transport,Gorakhpur has UPSRTC stand and private stand — different areas
+Railway Station,Patna Junction,Patna Sahib Station,Patna,Patna,Bihar,800001,25.5976,85.1381,transport,Patna has 3 railway stations — Junction is biggest but not only one
+Primary School,Govt Primary School,Prathmik Vidyalaya,Motihari,East Champaran,Bihar,845401,26.6503,84.9189,education,Every mohalla has a primary school — need street name or mohalla
+Primary School,Junior High School,Madhya Vidyalaya,Chapra,Saran,Bihar,841301,25.7700,84.7300,education,4 primary schools within 1km in Chapra town — highly ambiguous
+Anganwadi Centre,Anganwadi,Balwadi Kendra,Sitamarhi,Sitamarhi,Bihar,843302,26.5870,85.4850,welfare,1400+ Anganwadis in Sitamarhi district — need village name
+Post Office,Main Post Office,GPO,Bhagalpur,Bhagalpur,Bihar,812001,25.2425,86.9842,government,Main PO vs sub-POs — city has 11 branches
+Post Office,Sub Post Office,Dak Ghar,Gaya,Gaya,Bihar,823001,24.7955,84.9994,government,Near Bodh Gaya different from Gaya city PO — 17km apart
+Hospital,Sadar Hospital,District Hospital,Muzaffarpur,Muzaffarpur,Bihar,842001,26.1115,85.3763,medical,3 hospitals called Sadar Hospital in Muzaffarpur range
+Hospital,PHC,Community Health Centre,Vaishali,Vaishali,Bihar,844115,25.6950,85.1100,medical,PHC vs CHC vs Sadar — completely different locations
+Police Chowki,Thana,Police Station,Patna,Patna,Bihar,800006,25.6072,85.1252,police,Patna has 21 police thanas — thana name mandatory
+Masjid,Jama Masjid,Idgah,Chapra,Saran,Bihar,841301,25.7770,84.7380,mosque,Chapra city has Jama Masjid and Idgah both called 'masjid near chowk'
+Masjid,Sunni Masjid,Madrasa Masjid,Motihari,East Champaran,Bihar,845401,26.6530,84.9100,mosque,Two mosques on same road — need color/size description
+Bank,SBI,State Bank,Ara,Bhojpur,Bihar,802301,25.5520,84.6580,bank,SBI has 4 branches in Ara city — need branch name
+Bank,PNB,Punjab National Bank,Darbhanga,Darbhanga,Bihar,846004,26.1510,85.8880,bank,Different from PNB near hospital — 2km apart
+Chowk,Teen Batti Chowk,Tiraha,Motihari,East Champaran,Bihar,845401,26.6480,84.9150,intersection,Several intersections called Teen Batti Chowk in Motihari
+Chowk,Main Chowk,Bazar Chowk,Sitamarhi,Sitamarhi,Bihar,843301,26.5950,85.4920,intersection,Main Chowk is near clock tower; Bazar Chowk is 800m away
+Gurudwara,Gurdwara Sahib,Sikh Mandir,Patna,Patna,Bihar,800007,25.6106,85.1413,temple,Patna Sahib is famous but there are 3 Gurudwaras in Patna city
+Maidan,Town Maidan,Gandhi Maidan,Patna,Patna,Bihar,800001,25.5987,85.1378,open_ground,Gandhi Maidan Patna is famous; other cities have their own Gandhi Maidans
+ATM,SBI ATM,24 Hour ATM,Muzaffarpur,Muzaffarpur,Bihar,842001,26.1190,85.3700,bank,Hundreds of ATMs — customer must say which bank ATM
+Petrol Pump,HP Petrol Pump,Indian Oil Pump,Varanasi,Varanasi,Uttar Pradesh,221005,25.3230,82.9810,fuel,6 petrol pumps on BHU road alone — need color or brand
+School,DAV School,Delhi Public School,Gorakhpur,Gorakhpur,Uttar Pradesh,273001,26.7580,83.3700,education,Private schools with same shorthand — full name needed
+Hanuman Mandir,Balaji Temple,Pawanputra Mandir,Allahabad,Prayagraj,Uttar Pradesh,211001,25.4358,81.8463,temple,Prayagraj has 11 locally known Hanuman Mandirs
+Shiv Mandir,Shivala Ghat Mandir,Kashi Vishwanath,Varanasi,Varanasi,Uttar Pradesh,221001,25.3109,82.9990,temple,Famous KV temple distinct from Shivala Mandir 4km away
+Bus Stand,Mahatma Gandhi Bus Stand,Purana Adda,Allahabad,Prayagraj,Uttar Pradesh,211001,25.4436,81.8426,transport,Zero Road bus stand vs Civil Lines stand — completely different
+Anaj Mandi,Grain Market,Sabzi Mandi,Gorakhpur,Gorakhpur,Uttar Pradesh,273001,26.7500,83.3650,market,Anaj Mandi near station vs one near bypass — 5km apart
+College,Degree College,Govt College,Motihari,East Champaran,Bihar,845401,26.6520,84.9210,education,Multiple colleges called degree college in district
+Hospital,Nursing Home,Private Hospital,Darbhanga,Darbhanga,Bihar,846004,26.1480,85.8850,medical,Dozens of nursing homes — brand name mandatory
