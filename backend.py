@@ -1474,12 +1474,16 @@ async def list_landmarks(state: str = "", city: str = ""):
 # ──────────────────────────────────────────────────────────────
 #  ENTRY POINT
 # ──────────────────────────────────────────────────────────────
+import uvicorn
+
 if __name__ == "__main__":
-    import uvicorn
+    # Render automatically PORT env variable deta hai, agar local chala rahe hain toh 8000 use hoga
+    port = int(os.environ.get("PORT", 8000))
+    
     uvicorn.run(
         "backend:app",
-        host="127.0.0.1",
-        port=8000,
-        reload=True,
+        host="0.0.0.0",  # Isko 127.0.0.1 se badal kar 0.0.0.0 kar dein
+        port=port,       # Isko dynamic port kar dein
+        reload=False,     # Production (Render) par reload=False hona chahiye
         log_level="info",
     )
