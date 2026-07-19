@@ -31,6 +31,7 @@ from google import genai
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, UploadFile, File, HTTPException, Request, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 from typing_extensions import TypedDict
 
@@ -1445,6 +1446,7 @@ def _check_whisper() -> bool:
     except ImportError:
         return False
 
+
 # ──────────────────────────────────────────────────────────────
 #  REST: LIST LANDMARKS  (for map preview in frontend)
 # ──────────────────────────────────────────────────────────────
@@ -1470,6 +1472,14 @@ async def list_landmarks(state: str = "", city: str = ""):
             for r in rows
         ]
     }
+
+
+@app.get("/", response_class=HTMLResponse)
+def read_root():
+    html_path = os.path.join(os.path.dirname(__file__), "index.html")
+    with open(html_path, "r", encoding="utf-8") as f:
+        html_content = f.read()
+    return HTMLResponse(content=html_content, status_code=200)
 
 # ──────────────────────────────────────────────────────────────
 #  ENTRY POINT
