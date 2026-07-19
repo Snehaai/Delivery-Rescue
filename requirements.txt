@@ -13,7 +13,7 @@ langchain-core==0.3.8
 google-genai==1.30.0
 
 # HTTP client for OSM Nominatim
-httpx==0.27.2
+httpx==0.28.1
 
 # Data validation
 pydantic==2.9.2
@@ -23,6 +23,7 @@ python-dotenv==1.0.1
 
 # Audio transcription (optional — install separately)
 # openai-whisper==20240930
+openai-whisper==20250625
 # ffmpeg must be installed system-wide: brew install ffmpeg / apt install ffmpeg
 
 # Twilio — real outbound calling (optional — mock works without this)
@@ -33,3 +34,18 @@ python-multipart==0.0.12
 
 # WebSocket support (included in uvicorn[standard])
 websockets==13.1
+
+
+torch==2.13.0
+tiktoken==0.13.0
+numpy==2.4.6
+numba==0.66.0
+llvmlite==0.48.0
+tqdm==4.69.0
+more-itertools==11.1.0
+
+requests==2.34.2
+jinja2==3.1.6
+networkx==3.6.1
+fsspec==2026.6.0
+regex==2026.7.10
