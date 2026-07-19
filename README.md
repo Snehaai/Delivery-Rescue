@@ -628,7 +628,7 @@ LangGraph gives us:
 
 ### Prerequisites
 ```bash
-python --version          # Need 3.10+
+python --version          # Need 3.10+ (python 3.11 is most compatible)
 pip --version            # Comes with Python
 ```
  
@@ -677,8 +677,9 @@ INFO:     Uvicorn running on http://0.0.0.0:8000
  
 Double-click `index.html` OR open in browser:
 ```
-http://localhost:8000 (if serving HTML from backend)
-file:///path/to/index.html (if opening locally)
+python -m http.server 3000
+# OR
+http-server -p 3000
 ```
  
 ### Step 6: Verify Health
@@ -707,6 +708,12 @@ pip install openai-whisper
 brew install ffmpeg           # Mac
 sudo apt install ffmpeg       # Ubuntu
 # Windows: download from ffmpeg.org, add to PATH
+- FFmpeg 8.1.2 or later
+# Compatible Python Versions
+- Python 3.11+
+
+Windows:
+winget install Gyan.FFmpeg
 ```
  
 First call downloads model (~150MB), then cached.
