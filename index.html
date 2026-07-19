@@ -869,6 +869,10 @@ function plotCandidates(candidates, mainGps){
     map.fitBounds(bounds, {padding:[30,30], maxZoom:14});
   }
 }
+window.addEventListener('DOMContentLoaded', (event) => {
+    document.getElementById('backendUrlInput').value = window.location.origin;
+});
+  
 </script>
 </body>
 </html>
