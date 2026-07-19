@@ -293,20 +293,91 @@ def _local_search(landmarks: list[str], pincode: str, city: str,
         "candidates": candidates,
     }
 
+_nominatim_lock = asyncio.Lock()
+_nominatim_last_call = 0.0
+
+async def _nominatim_rate_limit():
+    """Enforce Nominatim's 1 req/sec usage policy across ALL callers (not per-request)."""
+    global _nominatim_last_call
+    async with _nominatim_lock:
+        elapsed = time.monotonic() - _nominatim_last_call
+        if elapsed < 1.05:
+            await asyncio.sleep(1.05 - elapsed)
+        _nominatim_last_call = time.monotonic()
+
+async def _locationiq_search(query: str, pincode: str = "", country: str = "") -> dict:
+    """
+    Optional higher-throughput free provider. Same underlying OSM data as
+    Nominatim, but LocationIQ's free tier (5,000 req/day, no card needed)
+    isn't limited to 1 req/sec. No-op (returns {}) if no key is configured
+    — Nominatim below still works standalone, this is purely additive.
+    Get a free key at https://locationiq.com and set LOCATIONIQ_API_KEY.
+    """
+    key = os.environ.get("LOCATIONIQ_API_KEY", "")
+    if not key:
+        return {}
+    params = {
+        "key": key,
+        "q": query + (f" {pincode}" if pincode else ""),
+        "format": "json",
+        "limit": 5,
+        "addressdetails": 1,
+    }
+    if country:
+        params["countrycodes"] = country
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.get("https://us1.locationiq.com/v1/search", params=params)
+            if resp.status_code != 200:
+                return {}
+            results = resp.json()
+        if not results or not isinstance(results, list):
+            return {}
+        top = results[0]
+        raw_conf = float(top.get("importance", 0.35))
+        return {
+            "lat": float(top["lat"]),
+            "lng": float(top["lon"]),
+            "display_name": top.get("display_name", "")[:160],
+            "source": "locationiq",
+            "confidence": round(min(raw_conf * 0.85, 0.85), 3),
+            "total_matches": len(results),
+            "ambiguous": len(results) > 2,
+            "osm_class": top.get("class", ""),
+            "osm_type": top.get("type", ""),
+        }
+    except Exception as e:
+        log.warning(f"LocationIQ search failed: {e}")
+        return {}
+
 async def _osm_search(query: str, pincode: str = "", country: str = "in") -> dict:
     """
-    Fallback: query OpenStreetMap Nominatim.
-    Returns best result or {} on failure.
-    Rate limit: 1 req/sec per OSM policy.
+    Global geocoder — tries LocationIQ first if configured (no rate-limit
+    worries), then falls back to Nominatim (always free, self-throttled
+    to 1 req/sec here so we never violate OSM's usage policy).
+    an India-only filter.
     """
+    country = "in"
+
+    liq = await _locationiq_search(query, pincode, country)
+    if liq:
+        return liq
+
+    await _nominatim_rate_limit()
+
+    search_query = query
+    if pincode:
+        search_query += f", {pincode}"
+
     params = {
-        "q": query + (" " + pincode if pincode else "") + " India",
+        "q": search_query,
         "format": "jsonv2",
         "limit": 5,
-        "countrycodes": country,
         "addressdetails": 1,
         "extratags": 1,
+        "countrycodes": "in"
     }
+
     headers = {
         "User-Agent": "DeliveryRescueAgenticAI/1.0 (hackathon-project; contact@example.com)"
     }
@@ -321,9 +392,11 @@ async def _osm_search(query: str, pincode: str = "", country: str = "in") -> dic
         if not results:
             return {}
         top = results[0]
-        # OSM importance score typically 0.0–1.0 but caps at ~0.7 for rural India
         raw_conf = float(top.get("importance", 0.3))
-        osm_conf = min(raw_conf * 0.75, 0.68)  # cap — OSM rural India coverage is patchy
+        # Cap scales with candidate count instead of one flat number —
+        # than a rural area returning 5 loosely-matching results.
+        cap = 0.80 if len(results) <= 2 else 0.65
+        osm_conf = min(raw_conf * 0.85, cap)
         return {
             "lat": float(top["lat"]),
             "lng": float(top["lon"]),
@@ -348,6 +421,8 @@ class RescueState(TypedDict):
     raw_address:            str
     pincode:                str
     city_hint:              str     # city name from order data if available
+    state_hint:             str     # state/province, if known — improves OSM disambiguation
+    country_hint:           str     # ISO country name or code, if known (blank = search globally)
     language:               str     # detected or provided language
 
     # Voice agent outputs
@@ -410,8 +485,6 @@ async def voice_agent(state: RescueState) -> dict:
         updates["fallback_triggered"] = True
         updates["status_message"] = "📵 No answer. Sending WhatsApp voice note in local dialect..."
         log.info(f"[{state['order_id']}] No answer — WhatsApp fallback triggered")
-        # In real system: Meta WhatsApp Business API call here
-        # For demo: we rely on transcript being provided after fallback
         if not transcript:
             return {
                 **updates,
@@ -455,49 +528,54 @@ async def voice_agent(state: RescueState) -> dict:
     # ── Gemini LLM extraction ──────────────────────────────────
     try:
         client = get_gemini()
-        prompt = f"""You are a delivery address intelligence agent for Indian e-commerce.
-A delivery partner is trying to reach a customer in a Tier 2/3 Indian city.
-The customer spoke in their local dialect (Hindi, Bhojpuri, Maithili, Awadhi, Marathi, Tamil, etc.)
+        prompt = f"""You are a delivery address intelligence agent for last-mile e-commerce.
+A delivery partner is trying to reach a customer, and the customer just spoke
+their address out loud — in any language, any country, any addressing style.
+This system was originally built for Tier 2/3 Indian cities (landmark-based
+addressing, since ~500M Indians lack a structured street address) so you
+should recognize that style well, but the transcript may equally be a
+standard structured address (house number, street, city, state, ZIP/pincode,
+country) from anywhere in the world — extract whatever is actually present,
+don't force an Indian-landmark shape onto it.
 
 TRANSCRIPT: "{transcript}"
 KNOWN CITY HINT: "{state.get('city_hint', 'unknown')}"
-PINCODE: "{state.get('pincode', '')}"
+KNOWN STATE HINT: "{state.get('state_hint', 'unknown')}"
+KNOWN COUNTRY HINT: "{state.get('country_hint', 'unknown')}"
+PINCODE / ZIP: "{state.get('pincode', '')}"
 
-Extract delivery location information from this transcript.
-Indian addresses commonly use:
-- Temples (mandir, masjid, church, gurudwara)
-- Government buildings (panchayat bhawan, block office, thana)
-- Schools, hospitals, shops
-- Directional words (peeche=behind, aage=ahead, baaju mein=next to, samne=in front)
-- Visual identifiers (neeli deewar=blue wall, peela gate=yellow gate, lal makaan=red house)
-- Relative position (teesra ghar=third house, doosri gali=second lane)
+Extract delivery location information from this transcript. Depending on
+style, this may include:
+- Landmark-based (common in Tier 2/3 India): temples/mosques/churches
+  (mandir, masjid, gurudwara), government buildings (panchayat bhawan,
+  thana), directional words (peeche=behind, aage=ahead, baaju mein=next to),
+  visual identifiers (neeli deewar=blue wall), relative position (teesra
+  ghar=third house)
+- Structured address (common elsewhere): house/apartment number, street
+  name, neighborhood, city, state/province, postal code, country
 
 Return ONLY a valid JSON object, no markdown, no explanation:
 {{
-  "landmarks": ["primary landmark as spoken", "secondary landmark if mentioned"],
-  "directions": ["directional clues exactly as understood"],
-  "identifiers": ["color or visual markers"],
+  "landmarks": ["primary landmark or street address as spoken", "secondary detail if mentioned"],
+  "directions": ["directional clues exactly as understood, if any"],
+  "identifiers": ["color/visual markers, apartment/unit numbers, etc, if any"],
   "inferred_city": "best guess of city/town from context or empty string",
+  "inferred_state": "best guess of state/province from context or empty string",
+  "inferred_country": "best guess of country from context or empty string",
   "clarification_needed": true/false,
-  "clarification_question": "in simple Hindi, what single question would resolve ambiguity? empty if not needed",
-  "confidence_hint": "high/medium/low — your confidence in landmark extraction"
+  "clarification_question": "one short question (in the same language the customer used) that would resolve ambiguity; empty if not needed",
+  "confidence_hint": "high/medium/low — your confidence in what you extracted"
 }}"""
 
         response = client.models.generate_content(
-            model="gemini-2.5-flash",
+            model="gemini-2.0-flash-exp",
             contents=prompt,
-            config= types.GenerateContentConfig(
+            config=types.GenerateContentConfig(
                 response_mime_type="application/json"
-    ),
-)
+            ),
+        )
 
         raw_resp = response.text.strip()
-
-        raw_resp = raw_resp.replace("```json", "")
-        raw_resp = raw_resp.replace("```", "")
-        raw_resp = raw_resp.strip()
-
-        # Strip markdown fences if present
         raw_resp = re.sub(r"^```(?:json)?\s*", "", raw_resp)
         raw_resp = re.sub(r"\s*```$", "", raw_resp)
 
@@ -506,29 +584,34 @@ Return ONLY a valid JSON object, no markdown, no explanation:
         directions  = extracted.get("directions", [])
         identifiers = extracted.get("identifiers", [])
         inf_city    = extracted.get("inferred_city", "")
+        inf_state   = extracted.get("inferred_state", "")
+        inf_country = extracted.get("inferred_country", "")
         needs_clarif = extracted.get("clarification_needed", False)
         conf_hint   = extracted.get("confidence_hint", "medium")
 
         updates["extracted_landmarks"]   = [l for l in landmarks if l]
         updates["extracted_directions"]  = directions
         updates["extracted_identifiers"] = identifiers
-        updates["inferred_city"]         = inf_city or state.get("city_hint", "")
+        
+        # Keep explicit user data hints or inherit from LLM parsing
+        updates["state_hint"] = state.get("state_hint") or inf_state
+        updates["country_hint"] = state.get("country_hint") or inf_country
+        updates["inferred_city"] = inf_city or state.get("city_hint", "")
+        
         updates["extraction_confidence_hint"] = conf_hint
         updates["status_message"]        = (
             f"📍 Extracted: {', '.join(landmarks[:2]) or 'no clear landmark'}"
-            + (f" | City inferred: {inf_city}" if inf_city else "")
+            + (f" | City inferred: {updates['inferred_city']}" if updates['inferred_city'] else "")
             + (" | ⚠️ Clarification needed" if needs_clarif else "")
         )
 
         if needs_clarif and state["retry_count"] < 2:
-            # Flag for re-ask — orchestrator will loop back
             updates["status_message"] += f" — Will ask: '{extracted.get('clarification_question', '')}'"
 
         log.info(f"[{state['order_id']}] LLM extraction OK: landmarks={landmarks}, conf_hint={conf_hint}")
 
     except json.JSONDecodeError as e:
         log.warning(f"[{state['order_id']}] LLM JSON parse error: {e}. Using keyword fallback.")
-        # Keyword fallback — works without LLM
         kw_map = {
             "mandir": "mandir", "masjid": "masjid", "school": "school",
             "bhawan": "bhawan", "dukaan": "store", "station": "station",
@@ -540,13 +623,16 @@ Return ONLY a valid JSON object, no markdown, no explanation:
             for kw, label in kw_map.items():
                 if kw in word and label not in found:
                     found.append(label)
+        
         updates["extracted_landmarks"]   = found or [transcript[:60]]
         updates["extracted_directions"]  = []
         updates["extracted_identifiers"] = []
         updates["inferred_city"]         = state.get("city_hint", "")
-        # No LLM judgement available — keyword matching is inherently less
-        # reliable than semantic extraction, so mark it "low" rather than
-        # silently inheriting whatever the previous turn's hint was.
+        
+        # 🔥 FIX: Preserve hints in fallback state dict to avoid cross-state leaks
+        updates["state_hint"]            = state.get("state_hint", "")
+        updates["country_hint"]          = state.get("country_hint", "")
+        
         updates["extraction_confidence_hint"] = "low"
         updates["status_message"]        = f"🔑 Keyword fallback used. Found: {found}"
         updates["error_log"]             = state["error_log"] + [f"LLM JSON error: {e}"]
@@ -557,6 +643,11 @@ Return ONLY a valid JSON object, no markdown, no explanation:
         updates["extracted_directions"]  = []
         updates["extracted_identifiers"] = []
         updates["inferred_city"]         = state.get("city_hint", "")
+        
+        # 🔥 FIX: Preserve hints in fallback state dict to avoid cross-state leaks
+        updates["state_hint"]            = state.get("state_hint", "")
+        updates["country_hint"]          = state.get("country_hint", "")
+        
         updates["extraction_confidence_hint"] = "low"
         updates["status_message"]        = f"⚠️ LLM unavailable — using raw transcript"
         updates["error_log"]             = state["error_log"] + [f"LLM error: {str(e)[:80]}"]
@@ -582,6 +673,8 @@ async def spatial_agent(state: RescueState) -> dict:
     landmarks   = state.get("extracted_landmarks", [])
     pincode     = state.get("pincode", "")
     city        = state.get("inferred_city", "") or state.get("city_hint", "")
+    state_hint  = state.get("state_hint", "")
+    country_hint = state.get("country_hint", "")
     noise       = state.get("noise_detected", False)
     retry       = state["retry_count"]
     directions  = state.get("extracted_directions", [])
@@ -637,8 +730,14 @@ async def spatial_agent(state: RescueState) -> dict:
     updates["status_message"] = "🌐 Local DB miss — querying OpenStreetMap..."
     log.info(f"[{state['order_id']}] Local DB miss. Trying OSM for: {landmarks[:2]}")
 
-    osm_query = " ".join(landmarks[:2]) + (" " + city if city else "")
-    osm_result = await _osm_search(osm_query, pincode)
+    osm_query = " ".join(landmarks[:2])
+    for part in (city, state_hint, country_hint):
+        if part:
+            osm_query += " " + part
+    # country param is left blank unless the caller explicitly gave one —
+    # that's what allows a US (or any country) address to resolve, since
+    # we no longer force everything through an "in"-only filter.
+    osm_result = await _osm_search(osm_query, pincode, country="")
 
     if osm_result:
         conf = osm_result.get("confidence", 0.3)
@@ -956,9 +1055,10 @@ async def transcribe_audio(audio: UploadFile = File(...)):
         model = whisper.load_model("base")   # ~150MB, cached after first load
         result = model.transcribe(
             tmp_path,
-            language=None,     # auto-detect
+            language="hi",     # auto-detect
             task="transcribe",
             fp16=False,        # CPU-safe
+            initial_prompt="Aapka delivery address landmark ke saath batayein, Relay your Delivery Address with Landmark"
         )
 
         segments = result.get("segments", [])
@@ -1027,7 +1127,8 @@ async def mock_call(req: MockCallRequest):
 #  SHARED HELPER — run the full LangGraph synchronously, keep trace
 # ──────────────────────────────────────────────────────────────
 async def _run_full_rescue(order_id: str, transcript: str, pincode: str = "",
-                            city_hint: str = "", call_answered: bool = True) -> dict:
+                            city_hint: str = "", call_answered: bool = True,
+                            state_hint: str = "", country_hint: str = "") -> dict:
     """
     Runs voice_agent -> spatial_agent -> route_agent (with internal
     retry/escalate loop already wired into the graph) to completion.
@@ -1035,13 +1136,19 @@ async def _run_full_rescue(order_id: str, transcript: str, pincode: str = "",
     agent-by-agent trace, useful for showing "state handoff" in UI.
     Used by both the Twilio recording callback and the manual/typed
     address fallback, so both paths go through the identical agents.
+
+    state_hint / country_hint are optional — pass them when the caller
+    knows more than just the city (e.g. testing a US address end to
+    end), so the geocoder isn't stuck guessing the rest of the world
+    from a city name alone.
     """
     initial: RescueState = {
         "order_id": order_id, "raw_address": transcript, "pincode": pincode,
-        "city_hint": city_hint, "language": "auto", "call_answered": call_answered,
+        "city_hint": city_hint, "state_hint": state_hint, "country_hint": country_hint,
+        "language": "auto", "call_answered": call_answered,
         "fallback_triggered": False, "audio_transcript": transcript,
         "noise_detected": False, "noise_cleaned": False, "extracted_landmarks": [],
-        "extracted_directions": [], "extracted_identifiers": [], "inferred_city": "",
+        "extracted_directions": [], "extracted_identifiers": [], "inferred_city": city_hint,
         "geocode_result": {}, "confidence_score": 0.0, "confidence_reason": "",
         "ambiguity_detected": False, "candidate_count": 0, "final_gps": {},
         "action_taken": "", "retry_count": 0, "status": "pending",
@@ -1063,6 +1170,8 @@ class ManualRescueRequest(BaseModel):
     transcript: str        # the address text driver typed/selected
     pincode:   str = ""
     city_hint: str = ""
+    state_hint: str = ""     # NEW — optional state/province, any country
+    country_hint: str = ""   # NEW — optional country name/code, blank = search globally
 
 @app.post("/api/manual-rescue")
 async def manual_rescue(req: ManualRescueRequest):
@@ -1070,8 +1179,20 @@ async def manual_rescue(req: ManualRescueRequest):
     Fallback path when Twilio calling isn't available/configured.
     Feeds a typed address straight into the same agent graph used
     by the real phone-call path, so the result is directly comparable.
+    Not restricted to any fixed set of cities — city_hint/state_hint/
+    country_hint are free text, so any address worldwide can be tested.
     """
-    result = await _run_full_rescue(req.order_id, req.transcript, req.pincode, req.city_hint)
+    result = await _run_full_rescue(
+        order_id=req.order_id,
+        transcript=req.transcript,
+        pincode=req.pincode,
+        city_hint=req.city_hint,
+        call_answered=True,
+        state_hint=req.state_hint,   
+        country_hint=req.country_hint
+    )
+    if not result["final"].get("state_hint") and req.state_hint:
+        result["final"]["state_hint"] = req.state_hint
     return result
 
 # ──────────────────────────────────────────────────────────────
@@ -1097,6 +1218,8 @@ class TwilioCallRequest(BaseModel):
     order_id:   str
     pincode:    str = ""
     city_hint:  str = ""
+    state_hint: str = ""
+    country_hint: str = ""
 
 @app.get("/api/twilio/status")
 async def twilio_status():
@@ -1135,7 +1258,8 @@ async def twilio_call(req: TwilioCallRequest):
         _twilio_results[call.sid] = {
             "status": "calling", "order_id": req.order_id,
             "pincode": req.pincode, "city_hint": req.city_hint,
-            "steps": [], "final": {},
+            "state_hint": req.state_hint, "country_hint": req.country_hint,
+            "steps": [], "final": {}, "transcript": "",
         }
         log.info(f"[Twilio] Call placed: sid={call.sid} to={req.to}")
         return {"call_sid": call.sid, "status": "calling"}
@@ -1191,8 +1315,21 @@ async def twilio_recording_status(request: Request, background_tasks: Background
     return {"ok": True}
 
 async def _process_twilio_recording(call_sid: str, recording_url: str):
+    """
+    Each stage below writes its own status + timestamp into _twilio_results
+    IMMEDIATELY, rather than batching everything into one update at the end.
+    /api/twilio/result/{call_sid} is polled by the frontend every ~1.2s, so
+    the driver actually sees "downloading" -> "transcribing" -> transcript
+    text appear -> "geocoding" -> pin drop, as distinct visible steps,
+    instead of a long silence followed by one final result.
+    """
     ctx = _twilio_results.get(call_sid, {})
-    ctx["status"] = "processing"
+
+    def publish(**fields):
+        ctx.update(fields)
+        _twilio_results[call_sid] = ctx
+
+    publish(status="downloading_audio", status_message="⬇️ Downloading call recording from Twilio...")
     try:
         sid = os.environ["TWILIO_ACCOUNT_SID"]
         token = os.environ["TWILIO_AUTH_TOKEN"]
@@ -1205,36 +1342,51 @@ async def _process_twilio_recording(call_sid: str, recording_url: str):
             tmp_path = tmp.name
 
         # Record + Whisper, not Twilio's built-in speech recognition —
-        # better accuracy on Hindi/Bhojpuri/Maithili per project requirements.
+        # better accuracy on Hindi/Bhojpuri/Maithili, and Whisper's
+        # multilingual auto-detect (language="hi") means the customer can
+        # say ANY address in ANY language — nothing here is India-locked.
+        publish(status="transcribing", status_message="🧠 Transcribing audio with Whisper...")
         try:
             import whisper
             model = whisper.load_model("base")
-            result = model.transcribe(tmp_path, language=None, task="transcribe", fp16=False)
+            result = model.transcribe(tmp_path, language="hi", task="transcribe", fp16=False,initial_prompt="Hanuman mandir ke paas, bus stand wali gali. Near landmark.")
             transcript = result["text"].strip()
+            detected_lang = result.get("language", "")
         except ImportError:
             transcript = ""
+            detected_lang = ""
             log.warning("[Twilio] openai-whisper not installed — cannot transcribe real call audio.")
         finally:
             Path(tmp_path).unlink(missing_ok=True)
 
         if not transcript:
-            ctx.update({"status": "error", "error": "Empty transcript — check Whisper install / call audio."})
+            publish(status="error", error="Empty transcript — check Whisper install / call audio.")
             return
+
+        # Publish the transcript THE MOMENT it's ready — don't wait for
+        # geocoding to finish. This is what makes the transcript show up
+        # live, before the pin lands on the map.
+        publish(
+            status="transcribed",
+            transcript=transcript,
+            detected_language=detected_lang,
+            status_message=f"📝 Transcript ready: \"{transcript[:80]}\" — now extracting location...",
+        )
 
         run = await _run_full_rescue(
             order_id=ctx.get("order_id", call_sid),
             transcript=transcript,
             pincode=ctx.get("pincode", ""),
             city_hint=ctx.get("city_hint", ""),
+            state_hint=ctx.get("state_hint", ""),
+            country_hint=ctx.get("country_hint", ""),
         )
-        ctx.update({"status": "done", "transcript": transcript, **run})
+        publish(status="done", transcript=transcript, **run)
         log.info(f"[Twilio] Call {call_sid} processed. Final status: {run['final'].get('status')}")
 
     except Exception as e:
         log.error(f"[Twilio] Processing failed for {call_sid}: {e}")
-        ctx.update({"status": "error", "error": str(e)})
-    finally:
-        _twilio_results[call_sid] = ctx
+        publish(status="error", error=str(e))
 
 @app.get("/api/twilio/result/{call_sid}")
 async def twilio_result(call_sid: str):
@@ -1250,19 +1402,23 @@ class GeocodeRequest(BaseModel):
     landmarks: list[str]
     pincode:   str = ""
     city:      str = ""
+    state:     str = ""
+    country:   str = ""   # optional ISO code (e.g. "us"); blank = search globally
 
 @app.post("/api/geocode")
 async def geocode_direct(req: GeocodeRequest):
     """
     Test the spatial agent's geocoding directly without running full graph.
-    Useful for testing with new addresses.
     """
     local = _local_search(req.landmarks, req.pincode, req.city)
     if local and local.get("confidence", 0) >= 0.35:
         return {"source": "local_db", "result": local}
 
-    osm_q = " ".join(req.landmarks[:2]) + (" " + req.city if req.city else "")
-    osm = await _osm_search(osm_q, req.pincode)
+    osm_q = " ".join(req.landmarks[:2])
+    for part in (req.city, req.state, req.country):
+        if part:
+            osm_q += " " + part
+    osm = await _osm_search(osm_q, req.pincode, country="in")
     if osm:
         return {"source": "openstreetmap", "result": osm}
 
@@ -1322,7 +1478,7 @@ if __name__ == "__main__":
     import uvicorn
     uvicorn.run(
         "backend:app",
-        host="0.0.0.0",
+        host="127.0.0.1",
         port=8000,
         reload=True,
         log_level="info",
