@@ -1,2 +1,8 @@
 
 ind.html
+.env
+.env.local
+venv/
+__pycache__/
+*.pyc
+.DS_Store
