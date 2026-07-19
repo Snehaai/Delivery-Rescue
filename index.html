@@ -73,7 +73,7 @@
   .liveAddr .lbl{font-size:11px;color:var(--purple);font-weight:700;margin-bottom:4px;}
   .liveAddr .txt{font-family:monospace;font-size:15px;font-weight:700;}
 
-  .log{margin-top:14px;max-height:220px;overflow-y:auto;}
+  .log{margin-top:14px;max-height:180px;overflow-y:auto;background:#fafafa;padding:10px;border-radius:10px;border:1px solid var(--border);}
   .log-item{display:flex;gap:8px;padding:7px 0;border-bottom:1px solid #f2f2f2;font-size:12px;}
   .dot{width:7px;height:7px;border-radius:50%;background:var(--purple);margin-top:5px;flex-shrink:0;}
   .log-item b{text-transform:capitalize;}
@@ -90,6 +90,14 @@
   .candBtn:hover{border-color:var(--purple);}
   .muted{color:var(--muted);font-size:12px;}
   .placeholder{color:var(--muted);font-size:13px;text-align:center;padding:40px 10px;}
+
+  /* Accordion styles */
+  .accordion-header {
+    background: var(--bg); color: var(--purple); font-weight: bold; font-size: 12px;
+    padding: 10px; border-radius: 8px; cursor: pointer; border: 1px solid var(--border);
+    display: flex; justify-content: space-between; align-items: center; margin-top: 15px;
+  }
+  .accordion-content { display: none; padding: 10px 0; }
 </style>
 </head>
 <body>
@@ -124,9 +132,9 @@
   </header>
 
   <div class="grid">
-    <!-- LEFT: Rescue Queue -->
+    <!-- LEFT: Delivery Queue -->
     <div class="card">
-      <h3>📋 Today's Rescue Queue</h3>
+      <h3>📋 Today's Delivery Queue</h3>
       <div id="queueList"></div>
     </div>
 
@@ -169,60 +177,133 @@
             <input id="typedAddr" />
           </div>
           <div class="field">
-            <label>Pincode</label>
+            <label>Pincode / ZIP</label>
             <input id="typedPincode" />
           </div>
           <div class="field">
             <label>City</label>
-            <input id="typedCity" />
+            <input id="typedCity" placeholder="city" />
           </div>
+          <div class="field">
+            <label>State / Province</label>
+            <input id="typedState" placeholder="State" />
+          </div>
+          <!-- Hidden Country Field (Strictly India) -->
+          <input type="hidden" id="typedCountry" value="India" />
           <button class="actionBtn secondary" onclick="runManual()">Run Rescue on This Text →</button>
-        </div>
+          
+          <hr style="border:0; border-top:1px dashed var(--border); margin:15px 0;">
+          
+          <!-- ACCORDION DROPDOWN FOR FREE-FORM ADDRESS TEST INPUT -->
+          <div class="accordion-header" onclick="toggleAccordion()">
+            <span>✨ Advanced: Free-form Address Geocode Test</span>
+            <span id="accordionArrow">▼</span>
+          </div>
+          
+          <div class="accordion-content" id="freeAddressAccordion">
+            <div class="field">
+              <label>📍 Address text:</label>
+              <input 
+                type="text" 
+                id="freeAddress" 
+                placeholder="e.g., Hanuman mandir ke paas" 
+                style="width:100%; padding:10px 12px; border:1px solid var(--border); border-radius:8px; font-size:13px;"
+              />
+              
+              <div style="display:flex; gap:8px; margin-top:8px;">
+                <div style="flex:1;">
+                  <label>City:</label>
+                  <input type="text" id="freeCity" placeholder="e.g. Muzaffarpur"
+                    style="width:100%; padding:10px 12px; border:1px solid var(--border); border-radius:8px; font-size:13px;" />
+                </div>
+                <div style="flex:1;">
+                  <label>State / Province:</label>
+                  <input type="text" id="freeState" placeholder="e.g. Bihar"
+                    style="width:100%; padding:10px 12px; border:1px solid var(--border); border-radius:8px; font-size:13px;" />
+                </div>
+              </div>
+              <div class="muted" style="margin-top:4px; font-size:11px;">
+                Geocoding restricted strictly to **India**.
+              </div>
 
-        <div class="log" id="agentLog"></div>
+              <button class="actionBtn" onclick="testFreeAddress(event)" style="margin-top:8px;">🔍 Geocode</button>
+            </div>
+          </div>
+        </div>
       </div>
     </div>
 
-    <!-- RIGHT: Map + Confidence -->
+    <!-- RIGHT: Tracker + Map + Confidence + Agent Traces -->
     <div class="card">
+      <!-- ================= DYNAMIC PIPELINE TRACKER ================= -->
+      <div class="card" style="margin-bottom: 12px; padding: 12px; border-color: var(--purple);">
+        <h4 style="margin:0 0 8px; font-size:11px; color:var(--purple); text-transform:uppercase;">Execution Flow Tracker</h4>
+        
+        <!-- Call Pipeline Indicators -->
+        <div id="callFlowTracker" style="display: flex; gap: 4px; justify-content: space-between; font-size: 10px; font-weight: bold; color: var(--muted);">
+          <span id="step_c1" style="padding: 3px 6px; border-radius: 4px; background: var(--bg);">1. Trigger</span>
+          <span id="step_c2" style="padding: 3px 6px; border-radius: 4px; background: var(--bg);">2. Call</span>
+          <span id="step_c3" style="padding: 3px 6px; border-radius: 4px; background: var(--bg);">3. Record</span>
+          <span id="step_c4" style="padding: 3px 6px; border-radius: 4px; background: var(--bg);">4. Text</span>
+          <span id="step_c5" style="padding: 3px 6px; border-radius: 4px; background: var(--bg);">5. GPS</span>
+        </div>
+
+        <!-- Manual Type Pipeline Indicators -->
+        <div id="typeFlowTracker" style="display: flex; gap: 4px; justify-content: space-between; font-size: 10px; font-weight: bold; color: var(--muted); display: none;">
+          <span id="step_t1" style="padding: 3px 8px; border-radius: 4px; background: var(--bg); flex: 1; text-align: center;">1. Trigger</span>
+          <span id="step_t2" style="padding: 3px 8px; border-radius: 4px; background: var(--bg); flex: 1; text-align: center;">2. Typed</span>
+          <span id="step_t3" style="padding: 3px 8px; border-radius: 4px; background: var(--bg); flex: 1; text-align: center;">3. GPS</span>
+        </div>
+      </div>
+
       <h3>🗺️ Live Location</h3>
       <div id="map"></div>
       <div class="confRow"><span>Confidence</span><span id="confPct">—</span></div>
       <div class="confBar"><div class="fill" id="confFill" style="width:0%;background:#ccc;"></div></div>
       <div id="resultArea"></div>
       <div id="candArea"></div>
+
+      <!-- AGENT LOG RELOCATED UNDER THE MAP -->
+      <h3 style="margin-top:20px; margin-bottom: 5px; font-size:12px; color:var(--purple); text-transform:uppercase;">🤖 Agent Execution Traces</h3>
+      <div class="log" id="agentLog"></div>
     </div>
   </div>
 </div>
 
 <script>
 /* ============================================================
-   DRIVER DATA — two hardcoded accounts, each with their own
-   assigned deliveries for the day (real landmark names that
-   exist in landmarks.csv, so the ambiguity demo still works)
+   DRIVER DATA — assigned deliveries setup
    ============================================================ */
 const DRIVERS = {
   driver1: { pass: "pass123", name: "Rajesh Kumar", route: "Muzaffarpur",
     orders: [
       { id:"ORD-4821", customer:"Sunita Devi", item:"Blue Cotton Saree ₹449",
-        raw:"Panchayat bhawan ke peeche, teesra ghar, neeli deewar", pincode:"842002", city:"Muzaffarpur" },
+        raw:"Panchayat bhawan ke peeche, teesra ghar, neeli deewar", pincode:"842002", city:"Muzaffarpur",
+        addressStatus:"unclear" },
       { id:"ORD-5503", customer:"Ramesh Kumar", item:"Men's Kurta Set ₹699",
-        raw:"Hanuman mandir ke paas, bus stand wali gali", pincode:"842001", city:"Muzaffarpur" },
+        raw:"Hanuman mandir ke paas, bus stand wali gali", pincode:"842001", city:"Muzaffarpur",
+        addressStatus:"unclear" },
       { id:"ORD-6712", customer:"Priya Singh", item:"Kids School Bag ₹299",
-        raw:"Sadar Hospital ke peeche, dusri gali", pincode:"842001", city:"Muzaffarpur" },
+        raw:"House No. 12, Ram Nagar Colony, Near City Bank, Muzaffarpur", pincode:"842001", city:"Muzaffarpur",
+        addressStatus:"clear" },
       { id:"ORD-7890", customer:"Deepak Yadav", item:"Pressure Cooker ₹889",
-        raw:"Kirana store ke saamne, Ramu bhaiya ki dukan ke paas", pincode:"844111", city:"Vaishali" },
+        raw:"Kirana store ke saamne, Ramu bhaiya ki dukan ke paas", pincode:"844111", city:"Vaishali",
+        addressStatus:"unclear" },
     ]},
   driver2: { pass: "pass456", name: "Amit Singh", route: "Darbhanga / Gorakhpur",
     orders: [
       { id:"ORD-8801", customer:"Meena Kumari", item:"Cotton Bedsheet Set ₹599",
-        raw:"Shiv mandir ke paas, station road", pincode:"841301", city:"Chapra" },
+        raw:"Shiv mandir ke paas, station road", pincode:"841301", city:"Chapra",
+        addressStatus:"unclear" },
       { id:"ORD-8802", customer:"Suresh Prasad", item:"Wall Clock ₹349",
-        raw:"Hanuman Mandir ke peeche, panchmukhi wala", pincode:"846004", city:"Darbhanga" },
+        raw:"Hanuman Mandir ke peeche, panchmukhi wala", pincode:"846004", city:"Darbhanga",
+        addressStatus:"unclear" },
       { id:"ORD-8803", customer:"Kavita Devi", item:"Steel Tiffin Box ₹279",
-        raw:"PNB bank ke saamne, teesri gali", pincode:"846004", city:"Darbhanga" },
+        raw:"Flat 3B, Shivam Apartments, Station Road, Darbhanga", pincode:"846004", city:"Darbhanga",
+        addressStatus:"clear" },
       { id:"ORD-8804", customer:"Manoj Thakur", item:"Kids Shoes ₹399",
-        raw:"Bus stand ke paas, purana adda", pincode:"273001", city:"Gorakhpur" },
+        raw:"Bus stand ke paas, purana adda", pincode:"273001", city:"Gorakhpur",
+        addressStatus:"unclear" },
     ]},
 };
 
@@ -231,6 +312,45 @@ let currentOrder = null;
 let activeTab = "call";
 let pollTimer = null;
 let map, marker, uncertaintyCircle, candidateMarkers = [];
+
+/* ---------------- PIPELINE VISUAL TRACKER ---------------- */
+function highlightFlowStep(pipeline, activeStepId) {
+  if (pipeline === 'call') {
+    document.getElementById('callFlowTracker').style.display = 'flex';
+    document.getElementById('typeFlowTracker').style.display = 'none';
+    
+    for(let i=1; i<=5; i++) {
+      let el = document.getElementById(`step_c${i}`);
+      if(el) { el.style.background = 'var(--bg)'; el.style.color = 'var(--muted)'; }
+    }
+    let activeEl = document.getElementById(activeStepId);
+    if(activeEl) { activeEl.style.background = 'var(--grad)'; activeEl.style.color = '#fff'; }
+    
+  } else if (pipeline === 'type') {
+    document.getElementById('callFlowTracker').style.display = 'none';
+    document.getElementById('typeFlowTracker').style.display = 'flex';
+    
+    for(let i=1; i<=3; i++) {
+      let el = document.getElementById(`step_t${i}`);
+      if(el) { el.style.background = 'var(--bg)'; el.style.color = 'var(--muted)'; }
+    }
+    let activeEl = document.getElementById(activeStepId);
+    if(activeEl) { activeEl.style.background = 'var(--grad)'; activeEl.style.color = '#fff'; }
+  }
+}
+
+/* ---------------- ACCORDION TOGGLE ---------------- */
+function toggleAccordion() {
+  const content = document.getElementById('freeAddressAccordion');
+  const arrow = document.getElementById('accordionArrow');
+  if (content.style.display === 'block') {
+    content.style.display = 'none';
+    arrow.textContent = '▼';
+  } else {
+    content.style.display = 'block';
+    arrow.textContent = '▲';
+  }
+}
 
 /* ---------------- LOGIN ---------------- */
 function doLogin(){
@@ -248,6 +368,7 @@ function doLogin(){
   renderQueue();
   initMap();
 }
+
 function doLogout(){
   currentDriver = null; currentOrder = null;
   document.getElementById('dashboard').style.display = 'none';
@@ -268,12 +389,16 @@ function renderQueue(){
     div.onclick = ()=>selectOrder(o.id);
     const pillClass = o._status==='rescued'?'rescued':o._status==='escalated'?'escalated':'pending';
     const pillText = o._status==='rescued'?'✅ Rescued':o._status==='escalated'?'⚠️ Escalated':'⏳ Pending';
+    const isUnclear = o.addressStatus === 'unclear' && o._status !== 'rescued';
+    const clarityPill = isUnclear
+      ? '<span class="statusPill escalated" style="margin-left:6px;">📍 Unclear — needs confirmation</span>'
+      : '<span class="statusPill rescued" style="margin-left:6px;">✅ Address clear</span>';
     div.innerHTML = `
       <div class="oid">${o.id}</div>
       <div class="cust">${o.customer}</div>
       <div class="muted">${o.item}</div>
       <div class="addr">"${o.raw}"</div>
-      <span class="statusPill ${pillClass}">${pillText}</span>`;
+      <span class="statusPill ${pillClass}">${pillText}</span>${clarityPill}`;
     list.appendChild(div);
   });
 }
@@ -282,20 +407,40 @@ function selectOrder(id){
   const d = DRIVERS[currentDriver];
   currentOrder = d.orders.find(o=>o.id===id);
   renderQueue();
-  document.getElementById('consolePlaceholder').style.display = 'none';
-  document.getElementById('consoleBody').style.display = 'block';
+
+  const needsAction = currentOrder.addressStatus === 'unclear' && currentOrder._status !== 'rescued';
+
   document.getElementById('orderSummary').innerHTML = `
     <div style="background:var(--bg);border-radius:10px;padding:10px 12px;margin-bottom:12px;">
       <b>${currentOrder.id}</b> — ${currentOrder.customer}<br>
       <span class="muted">${currentOrder.item}</span><br>
       <span class="addr" style="font-family:monospace;font-size:12px;">"${currentOrder.raw}"</span>
     </div>`;
+
+  if(!needsAction){
+    document.getElementById('consolePlaceholder').style.display = 'block';
+    document.getElementById('consolePlaceholder').innerHTML =
+      '✅ This address is already clear — no confirmation call needed. ' +
+      '(The rescue console only opens for orders flagged "Unclear".)';
+    document.getElementById('consoleBody').style.display = 'none';
+    return;
+  }
+
+  document.getElementById('consolePlaceholder').style.display = 'none';
+  document.getElementById('consoleBody').style.display = 'block';
   document.getElementById('phoneInput').value = '';
   document.getElementById('liveAddrBox').style.display = 'none';
   document.getElementById('callStatusMsg').textContent = '';
   document.getElementById('agentLog').innerHTML = '';
   document.getElementById('resultArea').innerHTML = '';
   document.getElementById('candArea').innerHTML = '';
+  const liveTranscript = document.getElementById('liveTranscriptBox');
+  if(liveTranscript) liveTranscript.remove();
+  
+  document.getElementById('callFlowTracker').style.display = activeTab === 'call' ? 'flex' : 'none';
+  document.getElementById('typeFlowTracker').style.display = activeTab === 'type' ? 'flex' : 'none';
+  highlightFlowStep(activeTab, '');
+
   resetMap();
   checkTwilioStatus();
   populateAddressDropdown();
@@ -308,6 +453,16 @@ function switchTab(t){
   document.getElementById('tabTypeBtn').classList.toggle('active', t==='type');
   document.getElementById('callTab').style.display = t==='call' ? 'block' : 'none';
   document.getElementById('typeTab').style.display = t==='type' ? 'block' : 'none';
+  
+  if (t === 'call') {
+    document.getElementById('callFlowTracker').style.display = 'flex';
+    document.getElementById('typeFlowTracker').style.display = 'none';
+    highlightFlowStep('call', '');
+  } else {
+    document.getElementById('callFlowTracker').style.display = 'none';
+    document.getElementById('typeFlowTracker').style.display = 'flex';
+    highlightFlowStep('type', '');
+  }
 }
 
 /* ---------------- TWILIO STATUS CHECK ---------------- */
@@ -335,6 +490,8 @@ async function startCall(){
   const phone = document.getElementById('phoneInput').value.trim();
   if(!phone){ alert('Enter a phone number first — no saved/mock numbers on purpose.'); return; }
 
+  highlightFlowStep('call', 'step_c1');
+
   const btn = document.getElementById('startCallBtn');
   btn.disabled = true; btn.textContent = '📞 Calling…';
   document.getElementById('callStatusMsg').textContent = 'Placing call via Twilio…';
@@ -351,6 +508,8 @@ async function startCall(){
     const data = await resp.json();
     if(!resp.ok){ throw new Error(data.detail || 'Call failed'); }
 
+    highlightFlowStep('call', 'step_c2');
+
     document.getElementById('liveAddrBox').style.display = 'block';
     document.getElementById('liveAddrTxt').textContent = currentOrder.raw;
     document.getElementById('callStatusMsg').textContent = '📞 Ringing… pick up and read the address above.';
@@ -359,36 +518,209 @@ async function startCall(){
   }catch(e){
     document.getElementById('callStatusMsg').textContent = '❌ ' + e.message + ' — try the "Type Instead" tab.';
     btn.disabled = false; btn.textContent = '📞 Start Call';
+    highlightFlowStep('call', '');
   }
 }
+
+const CALL_STAGE_LABELS = {
+  calling:           '📞 Call in progress…',
+  downloading_audio: '⬇️ Downloading recording from Twilio…',
+  transcribing:      '🧠 Transcribing audio with Whisper…',
+  transcribed:       '📝 Transcript ready — extracting landmarks & geocoding…',
+  spatial_processing:'🗺️ Pinpointing location…',
+  route_processing:  '🧭 Deciding action (auto-push / flag / retry)…',
+  done:              '✅ Done',
+  error:             '❌ Error',
+};
 
 function pollTwilioResult(callSid){
   if(pollTimer) clearInterval(pollTimer);
   pollTimer = setInterval(async ()=>{
     try{
       const r = await fetch(backendUrl() + '/api/twilio/result/' + callSid);
-      const j = await r.json();
-      if(j.status === 'calling'){
-        document.getElementById('callStatusMsg').textContent = '📞 Call in progress…';
-      } else if(j.status === 'processing'){
+      const data = await r.json(); 
+
+      document.getElementById('callStatusMsg').textContent =
+        CALL_STAGE_LABELS[data.status] || data.status_message || '⏳ Working…';
+
+      if (data.status === 'calling') {
+        highlightFlowStep('call', 'step_c2');
+      } else if (data.status === 'downloading_audio' || data.status === 'transcribing') {
+        highlightFlowStep('call', 'step_c3');
+      } else if (data.status === 'transcribed' || data.node === 'voice_agent') {
+        highlightFlowStep('call', 'step_c4');
+      } else if (data.status === 'spatial_processing' || data.status === 'route_processing' || data.status === 'done') {
+        highlightFlowStep('call', 'step_c5');
+      }
+
+      if(data.status !== 'calling'){
         document.getElementById('liveAddrBox').style.display = 'none';
-        document.getElementById('callStatusMsg').textContent = '🧠 Call ended — transcribing with Whisper & running agents…';
-      } else if(j.status === 'done'){
+      }
+
+      if(data.transcript){
+        let box = document.getElementById('liveTranscriptBox');
+        if(!box){
+          box = document.createElement('div');
+          box.id = 'liveTranscriptBox';
+          box.style.cssText = 'background:#F3E8FF;border:1px solid #D8B4FE;border-radius:8px;padding:10px 12px;margin:10px 0;font-size:13px;';
+          document.getElementById('callStatusMsg').insertAdjacentElement('afterend', box);
+        }
+        box.innerHTML = '📝 <b>Transcript:</b> "' + data.transcript + '"' +
+          (data.detected_language ? ' <span class="muted">(detected: ' + data.detected_language + ')</span>' : '');
+      }
+
+      if (data.steps && data.steps.length > 0) {
+        renderAgentLogs(data.steps);
+      }
+
+      if (data.final && data.final.confidence_score !== undefined) {
+        const conf = data.final.confidence_score;
+        const confBar = document.querySelector('.confBar .fill');
+        if (confBar) {
+          confBar.style.width = (conf * 100) + '%';
+          confBar.style.background = conf > 0.75 ? '#00A86B' : conf > 0.5 ? '#FF8C00' : '#E53935';
+        }
+      }
+
+      if (data.final && data.final.final_gps && data.final.final_gps.lat) {
+        const gps = data.final.final_gps;
+        if (map) {
+          map.setView([gps.lat, gps.lng], 15);
+          L.circleMarker([gps.lat, gps.lng], {
+            radius: 12, color: '#00A86B', fillColor: '#00A86B', fillOpacity: 0.7
+          }).addTo(map);
+        }
+      }
+
+      if(data.status === 'done'){
         clearInterval(pollTimer);
-        document.getElementById('liveAddrBox').style.display = 'none';
-        document.getElementById('callStatusMsg').textContent = '✅ Done. Transcript: "' + (j.transcript||'') + '"';
+        document.getElementById('callStatusMsg').textContent = '✅ Done. Transcript: "' + (data.transcript||'') + '"';
         document.getElementById('startCallBtn').disabled = false;
         document.getElementById('startCallBtn').textContent = '📞 Start Call';
-        renderRun(j);
-      } else if(j.status === 'error'){
+        renderRun(data);
+      } else if(data.status === 'error'){
         clearInterval(pollTimer);
-        document.getElementById('liveAddrBox').style.display = 'none';
-        document.getElementById('callStatusMsg').textContent = '❌ ' + (j.error || 'Processing failed') + ' — try "Type Instead".';
+        document.getElementById('callStatusMsg').textContent = '❌ ' + (data.error || 'Processing failed') + ' — try "Type Instead".';
         document.getElementById('startCallBtn').disabled = false;
         document.getElementById('startCallBtn').textContent = '📞 Start Call';
       }
-    }catch(e){ /* keep polling silently */ }
-  }, 1500);
+    }catch(e){ console.error('poll error', e); }
+  }, 1200);
+}
+
+// SHARED AGENT VISUAL LAYER HELPER
+function renderAgentLogs(steps) {
+  const logContainer = document.getElementById('agentLog');
+  if(!logContainer) return;
+  const colors = {
+    voice_agent: '#9B2FCB', spatial_agent: '#FF8C00',
+    route_agent: '#00A86B', escalate: '#E53935',
+  };
+  logContainer.innerHTML = steps.map(step => {
+    const agentName = step.node ? step.node.replace('_',' ') : (step.agent || 'Agent');
+    const detailMsg = step.state?.status_message || step.detail || '';
+    const color = colors[step.node] || colors[step.agent] || '#6B7280';
+    return `
+      <div class="log-item">
+        <div class="dot" style="background:${color};"></div>
+        <b style="color:${color};">${agentName}:</b> ${detailMsg}
+      </div>
+    `;
+  }).join('');
+}
+
+// ACCORDION / FREE-FORM INPUT PROCESSING FUNCTION (STRICTLY INDIA)
+async function testFreeAddress(event) {
+  const address = document.getElementById('freeAddress').value.trim();
+  const city = document.getElementById('freeCity').value.trim();
+  const stateVal = document.getElementById('freeState').value.trim();
+  const country = "India";
+  
+  if (!address) {
+    alert('Enter an address first');
+    return;
+  }
+  
+  highlightFlowStep('type', 'step_t1');
+  
+  const btn = event.target;
+  btn.disabled = true;
+  btn.textContent = '⏳ Processing...';
+  resetMap();
+  document.getElementById('candArea').innerHTML = '';
+  document.getElementById('resultArea').innerHTML = '';
+  
+  highlightFlowStep('type', 'step_t2');
+
+  try {
+    const response = await fetch(`${backendUrl()}/api/manual-rescue`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        order_id: 'FREE-TEST-' + Date.now(),
+        transcript: address + (city ? ", " + city : "") + (stateVal ? ", " + stateVal : ""),
+        pincode: '',
+        city_hint: city,
+        state_hint: stateVal,
+        country_hint: country
+      })
+    });
+    
+    const data = await response.json();
+    
+    highlightFlowStep('type', 'step_t3');
+
+    if (data.steps) {
+      renderAgentLogs(data.steps);
+    }
+    const final = data.final || {};
+    const conf = final.confidence_score || 0;
+    const pct = Math.round(conf * 100);
+    
+    document.getElementById('confPct').textContent = pct + '%';
+    const fill = document.getElementById('confFill');
+    if (fill) {
+      fill.style.width = pct + '%';
+      fill.style.background = pct >= 75 ? 'var(--green)' : pct >= 50 ? 'var(--orange)' : 'var(--red)';
+    }
+
+    if (final.final_gps && final.final_gps.lat !== undefined && final.final_gps.lng !== undefined) {
+      const gps = final.final_gps;
+      const cls = gps.action === 'auto_push' ? 'ok' : gps.action === 'push_flagged' ? 'flag' : 'fail';
+      
+      document.getElementById('resultArea').innerHTML = `
+        <div class="resultBox ${cls}">
+          📍 <b>${gps.display_name || 'Test Location'}</b><br>
+          Action: <b>${gps.action}</b><br>
+          <a href="https://www.google.com/maps?q=${gps.lat},${gps.lng}" target="_blank">Open in Google Maps →</a>
+        </div>`;
+        
+      placePin(gps.lat, gps.lng, gps.display_name || "Resolved Point");
+    } else {
+      document.getElementById('resultArea').innerHTML = `
+        <div class="resultBox fail">
+          ❓ <b>Location could not be strictly resolved inside India boundaries.</b>
+        </div>`;
+    }
+        
+    const geo = final.geocode_result || {};
+    if (geo.ambiguous && geo.candidates && geo.candidates.length) {
+      let html = `<div class="muted" style="margin-top:10px;">⚠️ Multiple matches found — check points on map:</div>`;
+      geo.candidates.forEach((c) => {
+        const safeName = c.display_name.replace(/"/g, '');
+        html += `<button class="candBtn" onclick='placePin(${c.lat},${c.lng},"${safeName}")'>📍 ${c.display_name} (${Math.round(c.raw_score * 100)}% match)</button>`;
+      });
+      document.getElementById('candArea').innerHTML = html;
+      plotCandidates(geo.candidates, final.final_gps);
+    }
+    
+  } catch (err) {
+    console.error('Frontend Fetch Error:', err);
+    highlightFlowStep('type', '');
+  } finally {
+    btn.disabled = false;
+    btn.textContent = '🔍 Geocode';
+  }
 }
 
 /* ---------------- TYPE TAB (manual fallback) ---------------- */
@@ -410,43 +742,50 @@ async function runManual(){
   const transcript = document.getElementById('typedAddr').value.trim();
   const pincode = document.getElementById('typedPincode').value.trim();
   const city = document.getElementById('typedCity').value.trim();
+  const stateVal = document.getElementById('typedState').value.trim();
+  const country = document.getElementById('typedCountry').value.trim();
   if(!transcript){ alert('Type or pick an address first.'); return; }
+
+  highlightFlowStep('type', 'step_t1');
 
   document.getElementById('agentLog').innerHTML = '<div class="muted">Running agents…</div>';
   document.getElementById('resultArea').innerHTML = '';
   document.getElementById('candArea').innerHTML = '';
   resetMap();
+  
+  highlightFlowStep('type', 'step_t2');
 
   try{
     const r = await fetch(backendUrl() + '/api/manual-rescue', {
       method:'POST', headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({ order_id: currentOrder.id, transcript, pincode, city_hint: city })
+      body: JSON.stringify({ order_id: currentOrder.id, transcript, pincode, city_hint: city, state_hint: stateVal, country_hint: country })
     });
     const j = await r.json();
+    
+    highlightFlowStep('type', 'step_t3');
     renderRun(j);
   }catch(e){
+    console.error('Frontend Fetch Error:', e);
     document.getElementById('agentLog').innerHTML = '<div class="muted">❌ Could not reach backend at ' + backendUrl() + '</div>';
+    highlightFlowStep('type', '');
   }
 }
 
 /* ---------------- SHARED: render agent trace + result + map ---------------- */
 function renderRun(run){
-  const logEl = document.getElementById('agentLog');
-  logEl.innerHTML = '';
-  (run.steps || []).forEach(s=>{
-    const item = document.createElement('div');
-    item.className = 'log-item';
-    item.innerHTML = `<div class="dot"></div><div><b>${s.node.replace('_',' ')}</b><br>${s.state.status_message || ''}</div>`;
-    logEl.appendChild(item);
-  });
+  if (run.steps && run.steps.length > 0) {
+    renderAgentLogs(run.steps);
+  }
 
   const final = run.final || {};
   const conf = final.confidence_score || 0;
   const pct = Math.round(conf*100);
   document.getElementById('confPct').textContent = pct + '%';
   const fill = document.getElementById('confFill');
-  fill.style.width = pct + '%';
-  fill.style.background = pct>=75 ? 'var(--green)' : pct>=50 ? 'var(--orange)' : 'var(--red)';
+  if (fill) {
+    fill.style.width = pct + '%';
+    fill.style.background = pct>=75 ? 'var(--green)' : pct>=50 ? 'var(--orange)' : 'var(--red)';
+  }
 
   const gps = final.final_gps || {};
   const resultArea = document.getElementById('resultArea');
@@ -498,21 +837,20 @@ function confirmCandidate(lat,lng,name){
 
 /* ---------------- MAP (Leaflet + OSM, no key needed) ---------------- */
 function initMap(){
-  map = L.map('map').setView([25.9, 85.5], 7);
+  if (map) return;
+  map = L.map('map').setView([23.5, 78.5], 5);
   L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
     attribution:'&copy; OpenStreetMap contributors', maxZoom:18
   }).addTo(map);
-  resetMap();
 }
 function resetMap(){
   if(!map) return;
   if(marker){ map.removeLayer(marker); marker=null; }
   if(uncertaintyCircle){ map.removeLayer(uncertaintyCircle); uncertaintyCircle=null; }
   candidateMarkers.forEach(m=>map.removeLayer(m)); candidateMarkers=[];
-  map.setView([25.9,85.5],7);
-  uncertaintyCircle = L.circle([25.9,85.5], {radius:40000, color:'#E53935', dashArray:'6,6', fillOpacity:0.08}).addTo(map);
 }
 function placePin(lat,lng,label){
+  if(!map || lat === undefined || lng === undefined) return;
   if(uncertaintyCircle){ map.removeLayer(uncertaintyCircle); uncertaintyCircle=null; }
   if(marker) map.removeLayer(marker);
   marker = L.marker([lat,lng]).addTo(map).bindPopup(label).openPopup();
@@ -527,7 +865,9 @@ function plotCandidates(candidates, mainGps){
     bounds.push([c.lat,c.lng]);
   });
   if(mainGps && mainGps.lat) bounds.push([mainGps.lat, mainGps.lng]);
-  if(bounds.length) map.fitBounds(bounds, {padding:[30,30]});
+  if(bounds.length && map) {
+    map.fitBounds(bounds, {padding:[30,30], maxZoom:14});
+  }
 }
 </script>
 </body>
