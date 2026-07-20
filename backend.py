@@ -2,16 +2,8 @@
 =============================================================
   DELIVERY RESCUE BACKEND  —  Agentic AI Last-Mile System
 =============================================================
-  Stack  : FastAPI · LangGraph · Gemini API · Whisper · OSM
+  Stack  : FastAPI · LangGraph · Groq API (Llama 3) · Whisper · OSM
   Author : Delivery Rescue Team
-  
-  HOW TO RUN  (copy-paste into terminal one line at a time)
-  ──────────────────────────────────────────────────────────
-  python -m venv venv
-  source venv/bin/activate          # Windows: venv\Scripts\activate
-  pip install -r requirements.txt
-  export GEMINI_API_KEY=YOUR-KEY-HERE
-  uvicorn backend:app --reload --port 8000
 =============================================================
 """
 
@@ -26,12 +18,10 @@ from typing import Optional, Literal, List
 #  THIRD-PARTY
 # ──────────────────────────────────────────────────────────────
 import httpx
-from google.genai import types
-from google import genai
+from groq import Groq
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, UploadFile, File, HTTPException, Request, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
-from fastapi.responses import HTMLResponse
+from fastapi.responses import JSONResponse, HTMLResponse
 from pydantic import BaseModel
 from typing_extensions import TypedDict
 
@@ -66,16 +56,12 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Gemini client (lazy — only fails if key missing when called)
-def get_gemini():
-    key = os.getenv("GEMINI_API_KEY")
-
+# Groq Client Initialization
+def get_groq():
+    key = os.getenv("GROQ_API_KEY")
     if not key:
-        raise RuntimeError(
-            "GEMINI_API_KEY not found."
-        )
-
-    return genai.Client(api_key=key)
+        raise RuntimeError("GROQ_API_KEY not found.")
+    return Groq(api_key=key)
 
 # ──────────────────────────────────────────────────────────────
 #  LANDMARK DATABASE  (loaded from CSV at startup)
@@ -98,14 +84,12 @@ def load_landmarks() -> list[dict]:
     with open(LANDMARK_CSV, newline="", encoding="utf-8") as f:
         reader = csv.DictReader(f)
         for row in reader:
-            # Convert lat/lng to float
             try:
                 row["lat"] = float(row["lat"])
                 row["lng"] = float(row["lng"])
             except (ValueError, KeyError):
                 continue
 
-            # Build a search bag-of-words from all text columns
             search_tokens = set()
             for col in ["landmark_name", "alias_1", "alias_2", "city", "district", "state", "pincode"]:
                 val = row.get(col, "")
@@ -128,7 +112,6 @@ async def startup():
 #  GEOCODING  — local DB + OSM fallback
 # ──────────────────────────────────────────────────────────────
 def _haversine(lat1, lng1, lat2, lng2) -> float:
-    """Great-circle distance in km."""
     R = 6371
     d_lat = math.radians(lat2 - lat1)
     d_lng = math.radians(lng2 - lng1)
@@ -158,23 +141,20 @@ def _fuzzy_ratio(query_landmarks: list[str], row: dict) -> float:
 def _local_search(landmarks: list[str], pincode: str, city: str,
                    directions: list = None, identifiers: list = None,
                    extraction_hint: str = "medium") -> dict:
-    """
+                     """
     Generic fuzzy-match against the landmark CSV.
     Returns the best match dict or {} with a confidence score.
-
     Scoring logic:
       +0.35  max(exact landmark-name token overlap, fuzzy string ratio)
       +0.15  alias match
       +0.25  pincode matches
       +0.15  city/district matches
       -0.10  each ambiguity_note mention of 'multiple' or 'ambiguous'
-
     After the structural score is computed, it is blended with two signals
     the LLM extraction step already produces but previously went unused:
-      - extraction_hint: Gemini's own "high/medium/low" self-assessment
+      - extraction_hint: "high/medium/low" self-assessment
       - clue richness: how many directional/visual clues the customer gave
         (more detail volunteered generally means a more reliable transcript)
-
     If multiple rows get a close score → ambiguity detected → confidence halved
     (this remains a safety brake, not a fix — see spatial_agent candidates list).
     """
@@ -183,7 +163,6 @@ def _local_search(landmarks: list[str], pincode: str, city: str,
 
     directions = directions or []
     identifiers = identifiers or []
-
     scored: list[tuple[float, dict]] = []
 
     query_tokens: set[str] = set()
@@ -200,7 +179,6 @@ def _local_search(landmarks: list[str], pincode: str, city: str,
 
     for row in _landmark_index:
         score = 0.0
-
         row_tokens = row["_tokens"]
         overlap = len(query_tokens & row_tokens)
         fuzzy = _fuzzy_ratio(landmarks, row)
@@ -210,30 +188,27 @@ def _local_search(landmarks: list[str], pincode: str, city: str,
         # Landmark name match — take whichever signal is stronger, exact
         # token overlap or fuzzy string similarity, rather than requiring
         # an exact match. Fixes false negatives from spelling variants.
+
         lm_name_tokens = set(re.split(r"[\s,/\-]+", row["landmark_name"].lower()))
         lm_overlap = len(query_tokens & lm_name_tokens)
         exact_component = 0.35 * (lm_overlap / max(len(lm_name_tokens), 1)) if lm_overlap else 0.0
         fuzzy_component = 0.35 * fuzzy
         score += max(exact_component, fuzzy_component)
-
-        # Alias match
+#alias match
         for alias_col in ["alias_1", "alias_2"]:
             alias = row.get(alias_col, "")
             if alias:
                 alias_tokens = set(re.split(r"[\s,/\-]+", alias.lower()))
                 if query_tokens & alias_tokens:
                     score += 0.15
-
-        # Pincode match
+#pincode match
         if pincode and pincode.strip() == row.get("pincode", "").strip():
             score += 0.25
-
-        # City/district match
+#city/district match
         city_tokens = set(re.split(r"[\s,/\-]+", (row.get("city","") + " " + row.get("district","")).lower()))
         if query_tokens & city_tokens:
             score += 0.15
-
-        # Ambiguity penalty — if the CSV note says there are multiple
+# Ambiguity penalty — if the CSV note says there are multiple
         note = row.get("ambiguity_note", "").lower()
         if any(w in note for w in ["multiple", "ambiguous", "different", "3 ", "4 ", "several"]):
             score -= 0.10
@@ -246,14 +221,13 @@ def _local_search(landmarks: list[str], pincode: str, city: str,
 
     scored.sort(key=lambda x: x[0], reverse=True)
     top_score, top_row = scored[0]
-
-    # Detect ambiguity using the RAW structural scores, before any blending —
+# Detect ambiguity using the RAW structural scores, before any blending —
     # ambiguity is a property of the data (multiple similarly-named places),
     # not of how confident the LLM felt.
+
     close_matches = [s for s, _ in scored if s >= top_score - 0.12]
     ambiguous = len(close_matches) > 1
-
-    # Blend in the two previously-unused signals:
+# Blend in the two previously-unused signals:
     #   - Gemini's own confidence in what it extracted
     #   - how much distinguishing detail the customer actually gave
     hint_val = _HINT_TO_NUMERIC.get(extraction_hint, 0.6)
@@ -262,9 +236,9 @@ def _local_search(landmarks: list[str], pincode: str, city: str,
 
     candidates = []
     if ambiguous:
-        top_score *= 0.55   # halve confidence when ambiguous — safety brake, not a fix
+        top_score *= 0.55
         log.info(f"Ambiguity detected: {len(close_matches)} close matches. Confidence halved.")
-        # Surface the actual candidates so the UI can plot all of them on the
+      # Surface the actual candidates so the UI can plot all of them on the
         # map and let the driver pick the right one visually, rather than the
         # system silently guessing or making the customer repeat themselves.
         candidates = [
@@ -298,7 +272,6 @@ _nominatim_lock = asyncio.Lock()
 _nominatim_last_call = 0.0
 
 async def _nominatim_rate_limit():
-    """Enforce Nominatim's 1 req/sec usage policy across ALL callers (not per-request)."""
     global _nominatim_last_call
     async with _nominatim_lock:
         elapsed = time.monotonic() - _nominatim_last_call
@@ -359,7 +332,6 @@ async def _osm_search(query: str, pincode: str = "", country: str = "in") -> dic
     an India-only filter.
     """
     country = "in"
-
     liq = await _locationiq_search(query, pincode, country)
     if liq:
         return liq
@@ -394,7 +366,7 @@ async def _osm_search(query: str, pincode: str = "", country: str = "in") -> dic
             return {}
         top = results[0]
         raw_conf = float(top.get("importance", 0.3))
-        # Cap scales with candidate count instead of one flat number —
+       # Cap scales with candidate count instead of one flat number —
         # than a rural area returning 5 loosely-matching results.
         cap = 0.80 if len(results) <= 2 else 0.65
         osm_conf = min(raw_conf * 0.85, cap)
@@ -414,52 +386,47 @@ async def _osm_search(query: str, pincode: str = "", country: str = "in") -> dic
         return {}
 
 # ──────────────────────────────────────────────────────────────
-#  SHARED STATE SCHEMA  — the single object all agents share
+#  SHARED STATE SCHEMA
 # ──────────────────────────────────────────────────────────────
 class RescueState(TypedDict):
-    # Input
     order_id:               str
     raw_address:            str
     pincode:                str
-    city_hint:              str     # city name from order data if available
-    state_hint:             str     # state/province, if known — improves OSM disambiguation
-    country_hint:           str     # ISO country name or code, if known (blank = search globally)
-    language:               str     # detected or provided language
+    city_hint:              str
+    state_hint:             str
+    country_hint:           str
+    language:               str
 
-    # Voice agent outputs
     call_answered:          bool
-    fallback_triggered:     bool    # True when WhatsApp fallback used
+    fallback_triggered:      bool
     audio_transcript:       str
     noise_detected:         bool
     noise_cleaned:          bool
-    extracted_landmarks:    list    # list of landmark strings
-    extracted_directions:   list    # directional clues ("peeche", "baaju mein")
-    extracted_identifiers:  list    # colour/visual clues ("neeli deewar")
-    inferred_city:          str     # LLM's best guess of city from transcript
-    extraction_confidence_hint: str # LLM's own "high"/"medium"/"low" self-assessment
+    extracted_landmarks:    list
+    extracted_directions:   list
+    extracted_identifiers:  list
+    inferred_city:          str
+    extraction_confidence_hint: str
 
-    # Spatial agent outputs
-    geocode_result:         dict    # full geocode result
-    confidence_score:       float   # 0.0 – 1.0
+    geocode_result:         dict
+    confidence_score:       float
     confidence_reason:      str
     ambiguity_detected:     bool
     candidate_count:        int
 
-    # Route agent outputs
     final_gps:              dict
-    action_taken:           str     # "auto_push" | "push_flagged" | "retry" | "escalate"
+    action_taken:           str
 
-    # Orchestration
     retry_count:            int
     status:                 str
     status_message:         str
     error_log:              list
 
 # ──────────────────────────────────────────────────────────────
-#  NODE 1  —  VOICE AGENT
+#  NODE 1  —  VOICE AGENT (USING GROQ LLAMA-3.1)
 # ──────────────────────────────────────────────────────────────
 async def voice_agent(state: RescueState) -> dict:
-    """
+  """
     Responsibilities:
       1. Simulate / receive phone call result
       2. Detect and clean background noise from transcript
@@ -469,7 +436,6 @@ async def voice_agent(state: RescueState) -> dict:
     """
     updates: dict = {"status": "voice_processing"}
 
-    # Guard: max retries
     if state["retry_count"] >= 3:
         return {
             **updates,
@@ -480,8 +446,7 @@ async def voice_agent(state: RescueState) -> dict:
 
     transcript = state.get("audio_transcript", "").strip()
     call_answered = state.get("call_answered", True)
-
-    # ── Handle no-answer scenario ──────────────────────────────
+ # ── Handle no-answer scenario ──────────────────────────────
     if not call_answered and not state.get("fallback_triggered"):
         updates["fallback_triggered"] = True
         updates["status_message"] = "📵 No answer. Sending WhatsApp voice note in local dialect..."
@@ -495,8 +460,7 @@ async def voice_agent(state: RescueState) -> dict:
             }
         updates["call_answered"] = True
         updates["status_message"] = "✅ Customer replied via WhatsApp."
-
-    # ── Noise detection and cleaning ───────────────────────────
+# ── Noise detection and cleaning ───────────────────────────
     noise_markers = ["[noise]", "[inaudible]", "[static]", "[background]", "..."]
     raw_noise = any(m in transcript.lower() for m in noise_markers)
 
@@ -513,8 +477,7 @@ async def voice_agent(state: RescueState) -> dict:
     else:
         updates["noise_detected"] = False
         updates["noise_cleaned"] = False
-
-    # Transcript too short even after cleaning
+ # Transcript too short even after cleaning
     if len(transcript.strip()) < 5:
         return {
             **updates,
@@ -526,61 +489,42 @@ async def voice_agent(state: RescueState) -> dict:
     updates["audio_transcript"] = transcript
     updates["status_message"] = "🧠 Extracting landmarks..."
 
-    # ── Gemini LLM extraction ──────────────────────────────────
+    # ── Groq LLM extraction ──────────────────────────────────
     try:
-        client = get_gemini()
+        groq_client = get_groq()
         prompt = f"""You are a delivery address intelligence agent for last-mile e-commerce.
-A delivery partner is trying to reach a customer, and the customer just spoke
-their address out loud — in any language, any country, any addressing style.
-This system was originally built for Tier 2/3 Indian cities (landmark-based
-addressing, since ~500M Indians lack a structured street address) so you
-should recognize that style well, but the transcript may equally be a
-standard structured address (house number, street, city, state, ZIP/pincode,
-country) from anywhere in the world — extract whatever is actually present,
-don't force an Indian-landmark shape onto it.
-
+Extract delivery location information from this transcript:
 TRANSCRIPT: "{transcript}"
 KNOWN CITY HINT: "{state.get('city_hint', 'unknown')}"
 KNOWN STATE HINT: "{state.get('state_hint', 'unknown')}"
 KNOWN COUNTRY HINT: "{state.get('country_hint', 'unknown')}"
 PINCODE / ZIP: "{state.get('pincode', '')}"
 
-Extract delivery location information from this transcript. Depending on
-style, this may include:
-- Landmark-based (common in Tier 2/3 India): temples/mosques/churches
-  (mandir, masjid, gurudwara), government buildings (panchayat bhawan,
-  thana), directional words (peeche=behind, aage=ahead, baaju mein=next to),
-  visual identifiers (neeli deewar=blue wall), relative position (teesra
-  ghar=third house)
-- Structured address (common elsewhere): house/apartment number, street
-  name, neighborhood, city, state/province, postal code, country
-
 Return ONLY a valid JSON object, no markdown, no explanation:
 {{
   "landmarks": ["primary landmark or street address as spoken", "secondary detail if mentioned"],
-  "directions": ["directional clues exactly as understood, if any"],
-  "identifiers": ["color/visual markers, apartment/unit numbers, etc, if any"],
+  "directions": ["directional clues if any"],
+  "identifiers": ["color/visual markers, apartment/unit numbers, etc if any"],
   "inferred_city": "best guess of city/town from context or empty string",
   "inferred_state": "best guess of state/province from context or empty string",
-  "inferred_country": "best guess of country from context or empty string",
+  "inferred_country": "best guess of country or empty string",
   "clarification_needed": true/false,
   "clarification_question": "one short question (in the same language the customer used) that would resolve ambiguity; empty if not needed",
-  "confidence_hint": "high/medium/low — your confidence in what you extracted"
+  "confidence_hint": "high/medium/low"
 }}"""
 
-        response = client.models.generate_content(
-            model="gemini-2.0-flash",
-            contents=prompt,
-            config=types.GenerateContentConfig(
-                response_mime_type="application/json"
-            ),
+        response = groq_client.chat.completions.create(
+            model="llama-3.1-8b-instant",
+            messages=[
+                {"role": "system", "content": "You are a precise JSON-only delivery location extractor. Always respond with valid JSON."},
+                {"role": "user", "content": prompt}
+            ],
+            response_format={"type": "json_object"}
         )
 
-        raw_resp = response.text.strip()
-        raw_resp = re.sub(r"^```(?:json)?\s*", "", raw_resp)
-        raw_resp = re.sub(r"\s*```$", "", raw_resp)
-
+        raw_resp = response.choices[0].message.content.strip()
         extracted = json.loads(raw_resp)
+
         landmarks   = extracted.get("landmarks", [])
         directions  = extracted.get("directions", [])
         identifiers = extracted.get("identifiers", [])
@@ -593,14 +537,13 @@ Return ONLY a valid JSON object, no markdown, no explanation:
         updates["extracted_landmarks"]   = [l for l in landmarks if l]
         updates["extracted_directions"]  = directions
         updates["extracted_identifiers"] = identifiers
-        
-        # Keep explicit user data hints or inherit from LLM parsing
+
         updates["state_hint"] = state.get("state_hint") or inf_state
         updates["country_hint"] = state.get("country_hint") or inf_country
         updates["inferred_city"] = inf_city or state.get("city_hint", "")
-        
+
         updates["extraction_confidence_hint"] = conf_hint
-        updates["status_message"]        = (
+        updates["status_message"]         = (
             f"📍 Extracted: {', '.join(landmarks[:2]) or 'no clear landmark'}"
             + (f" | City inferred: {updates['inferred_city']}" if updates['inferred_city'] else "")
             + (" | ⚠️ Clarification needed" if needs_clarif else "")
@@ -609,10 +552,10 @@ Return ONLY a valid JSON object, no markdown, no explanation:
         if needs_clarif and state["retry_count"] < 2:
             updates["status_message"] += f" — Will ask: '{extracted.get('clarification_question', '')}'"
 
-        log.info(f"[{state['order_id']}] LLM extraction OK: landmarks={landmarks}, conf_hint={conf_hint}")
+        log.info(f"[{state['order_id']}] Groq LLM extraction OK: landmarks={landmarks}, conf_hint={conf_hint}")
 
-    except json.JSONDecodeError as e:
-        log.warning(f"[{state['order_id']}] LLM JSON parse error: {e}. Using keyword fallback.")
+    except Exception as e:
+        log.error(f"[{state['order_id']}] Groq LLM call failed: {e}. Using keyword fallback.")
         kw_map = {
             "mandir": "mandir", "masjid": "masjid", "school": "school",
             "bhawan": "bhawan", "dukaan": "store", "station": "station",
@@ -624,34 +567,16 @@ Return ONLY a valid JSON object, no markdown, no explanation:
             for kw, label in kw_map.items():
                 if kw in word and label not in found:
                     found.append(label)
-        
+
         updates["extracted_landmarks"]   = found or [transcript[:60]]
         updates["extracted_directions"]  = []
         updates["extracted_identifiers"] = []
         updates["inferred_city"]         = state.get("city_hint", "")
-        
-        # 🔥 FIX: Preserve hints in fallback state dict to avoid cross-state leaks
         updates["state_hint"]            = state.get("state_hint", "")
         updates["country_hint"]          = state.get("country_hint", "")
-        
         updates["extraction_confidence_hint"] = "low"
-        updates["status_message"]        = f"🔑 Keyword fallback used. Found: {found}"
-        updates["error_log"]             = state["error_log"] + [f"LLM JSON error: {e}"]
-
-    except Exception as e:
-        log.error(f"[{state['order_id']}] LLM call failed: {e}")
-        updates["extracted_landmarks"]   = [transcript[:60]]
-        updates["extracted_directions"]  = []
-        updates["extracted_identifiers"] = []
-        updates["inferred_city"]         = state.get("city_hint", "")
-        
-        # 🔥 FIX: Preserve hints in fallback state dict to avoid cross-state leaks
-        updates["state_hint"]            = state.get("state_hint", "")
-        updates["country_hint"]          = state.get("country_hint", "")
-        
-        updates["extraction_confidence_hint"] = "low"
-        updates["status_message"]        = f"⚠️ LLM unavailable — using raw transcript"
-        updates["error_log"]             = state["error_log"] + [f"LLM error: {str(e)[:80]}"]
+        updates["status_message"]         = f"🔑 Keyword fallback used. Found: {found}"
+        updates["error_log"]              = state["error_log"] + [f"LLM error: {str(e)[:80]}"]
 
     return updates
 
@@ -659,13 +584,6 @@ Return ONLY a valid JSON object, no markdown, no explanation:
 #  NODE 2  —  SPATIAL AGENT
 # ──────────────────────────────────────────────────────────────
 async def spatial_agent(state: RescueState) -> dict:
-    """
-    Responsibilities:
-      1. Search local landmark CSV for best match
-      2. Detect ambiguity (multiple same-name landmarks)
-      3. Fall back to OSM Nominatim if local DB misses
-      4. Compute and calibrate confidence score
-    """
     updates: dict = {
         "status": "spatial_processing",
         "status_message": "🗺️ Searching landmark database...",
@@ -693,21 +611,14 @@ async def spatial_agent(state: RescueState) -> dict:
             "error_log": state["error_log"] + ["Spatial: empty landmark list"],
         }
 
-    # ── Step 1: Local CSV search ────────────────────────────────
     local_result = _local_search(landmarks, pincode, city, directions, identifiers, conf_hint)
 
     if local_result and local_result.get("confidence", 0) >= 0.35:
         conf = local_result["confidence"]
-
-        # Calibrate: noise reduces confidence
         if noise:
             conf *= 0.82
-
-        # Calibrate: retry means previous answer was vague — reduce
         if retry > 0:
             conf = min(conf, 0.72)
-
-        # Calibrate: ambiguity in DB row
         if local_result.get("ambiguous"):
             conf = min(conf, 0.55)
             reason = f"Ambiguous: {local_result.get('total_matches', '?')} candidates with similar names. {local_result.get('ambiguity_note', '')}"
@@ -727,7 +638,6 @@ async def spatial_agent(state: RescueState) -> dict:
         log.info(f"[{state['order_id']}] Local DB match: conf={conf:.2f}, ambiguous={local_result.get('ambiguous')}")
         return updates
 
-    # ── Step 2: OSM Nominatim fallback ─────────────────────────
     updates["status_message"] = "🌐 Local DB miss — querying OpenStreetMap..."
     log.info(f"[{state['order_id']}] Local DB miss. Trying OSM for: {landmarks[:2]}")
 
@@ -735,9 +645,7 @@ async def spatial_agent(state: RescueState) -> dict:
     for part in (city, state_hint, country_hint):
         if part:
             osm_query += " " + part
-    # country param is left blank unless the caller explicitly gave one —
-    # that's what allows a US (or any country) address to resolve, since
-    # we no longer force everything through an "in"-only filter.
+
     osm_result = await _osm_search(osm_query, pincode, country="")
 
     if osm_result:
@@ -758,35 +666,21 @@ async def spatial_agent(state: RescueState) -> dict:
         })
         return updates
 
-    # ── No match at all ─────────────────────────────────────────
     return {
         **updates,
         "geocode_result":    {},
         "confidence_score":  0.0,
         "confidence_reason": "No match in local DB or OSM",
-        "ambiguity_detected": True,   # treat as ambiguous to force retry
+        "ambiguity_detected": True,
         "candidate_count":   0,
         "status_message":    "❓ Location not found. Will retry with more detail.",
-        "error_log":         state["error_log"] + ["Spatial: no result from DB or OSM"],
+        "error_log":          state["error_log"] + ["Spatial: no result from DB or OSM"],
     }
 
 # ──────────────────────────────────────────────────────────────
 #  NODE 3  —  ROUTE AGENT
 # ──────────────────────────────────────────────────────────────
 async def route_agent(state: RescueState) -> dict:
-    """
-    Responsibilities:
-      1. Apply confidence thresholds to decide action
-      2. Auto-push if high confidence
-      3. Push with caution flag if medium
-      4. Signal retry if low but geocode exists
-      5. Escalate if retries exhausted
-    Thresholds:
-      ≥ 0.75  → auto_push      (push immediately, no flag)
-      0.50–0.74 → push_flagged (push + ops review flag)
-      0.25–0.49 → retry        (loop back to voice agent)
-      < 0.25  → escalate
-    """
     score  = state.get("confidence_score", 0.0)
     geo    = state.get("geocode_result", {})
     retry  = state["retry_count"]
@@ -794,7 +688,6 @@ async def route_agent(state: RescueState) -> dict:
 
     updates: dict = {"status": "route_processing"}
 
-    # Force escalate after too many retries
     if retry >= 3:
         return {
             **updates,
@@ -804,11 +697,10 @@ async def route_agent(state: RescueState) -> dict:
             "final_gps": {},
         }
 
-    # ── HIGH CONFIDENCE ─────────────────────────────────────────
     if score >= 0.75 and geo:
         final = {
-            "lat":               geo["lat"],
-            "lng":               geo["lng"],
+            "lat":                geo["lat"],
+            "lng":                geo["lng"],
             "display_name":      geo.get("display_name", ""),
             "confidence":        score,
             "flagged_for_review": False,
@@ -824,11 +716,10 @@ async def route_agent(state: RescueState) -> dict:
             "final_gps":      final,
         }
 
-    # ── MEDIUM CONFIDENCE ───────────────────────────────────────
     if 0.50 <= score < 0.75 and geo:
         final = {
-            "lat":               geo["lat"],
-            "lng":               geo["lng"],
+            "lat":                geo["lat"],
+            "lng":                geo["lng"],
             "display_name":      geo.get("display_name", ""),
             "confidence":        score,
             "flagged_for_review": True,
@@ -845,7 +736,6 @@ async def route_agent(state: RescueState) -> dict:
             "final_gps":      final,
         }
 
-    # ── LOW / NO CONFIDENCE — retry ──────────────────────────────
     if retry < 3:
         log.info(f"[{state['order_id']}] LOW conf {score:.0%} → retry {retry+1}")
         return {
@@ -857,7 +747,6 @@ async def route_agent(state: RescueState) -> dict:
             "final_gps":      {},
         }
 
-    # ── FALLBACK ESCALATE ───────────────────────────────────────
     return {
         **updates,
         "status":         "escalated",
@@ -870,10 +759,6 @@ async def route_agent(state: RescueState) -> dict:
 #  NODE 4  —  ESCALATION NODE
 # ──────────────────────────────────────────────────────────────
 async def escalate_node(state: RescueState) -> dict:
-    """
-    Final fallback. In production: push to ops dashboard,
-    create a support ticket, notify supervisor.
-    """
     log.warning(f"[{state['order_id']}] ESCALATED after {state['retry_count']} retries.")
     return {
         "status":         "escalated",
@@ -886,10 +771,6 @@ async def escalate_node(state: RescueState) -> dict:
 #  CONDITIONAL EDGE — orchestrator routing logic
 # ──────────────────────────────────────────────────────────────
 def routing_decision(state: RescueState) -> str:
-    """
-    Called by LangGraph after route_agent runs.
-    This is the brain of the agentic system — decides what happens next.
-    """
     action  = state.get("action_taken", "")
     status  = state.get("status", "")
     retry   = state.get("retry_count", 0)
@@ -901,7 +782,7 @@ def routing_decision(state: RescueState) -> str:
         return "escalate"
 
     if action == "retry" and retry < 3:
-        return "retry_voice"   # loop back
+        return "retry_voice"
 
     return "end"
 
@@ -909,18 +790,6 @@ def routing_decision(state: RescueState) -> str:
 #  BUILD LANGGRAPH
 # ──────────────────────────────────────────────────────────────
 def build_graph() -> any:
-    """
-    Constructs the LangGraph StateGraph.
-
-    Flow:
-        voice_agent → spatial_agent → route_agent
-                                         │
-              ┌──────────────────────────┘
-              │ routing_decision()
-              ├── "end"         → END
-              ├── "escalate"    → escalate_node → END
-              └── "retry_voice" → voice_agent (loop)
-    """
     g = StateGraph(RescueState)
 
     g.add_node("voice_agent",   voice_agent)
@@ -950,24 +819,10 @@ rescue_graph = build_graph()
 log.info("LangGraph compiled successfully.")
 
 # ──────────────────────────────────────────────────────────────
-#  WEBSOCKET ENDPOINT  — real-time streaming
+#  WEBSOCKET ENDPOINT
 # ──────────────────────────────────────────────────────────────
 @app.websocket("/ws/rescue/{order_id}")
 async def rescue_ws(ws: WebSocket, order_id: str):
-    """
-    The primary endpoint.
-    
-    Protocol:
-      1. Client connects
-      2. Client sends JSON: initial rescue state (see RescueRequest schema)
-      3. Server streams state update events as JSON for each agent step
-      4. Server sends {"event":"complete"} at the end
-    
-    Event format:
-      {"event": "step", "node": "voice_agent", "state": {...partial state...}}
-      {"event": "complete"}
-      {"event": "error", "message": "..."}
-    """
     await ws.accept()
     log.info(f"[WS] New connection: order={order_id}")
 
@@ -1006,7 +861,6 @@ async def rescue_ws(ws: WebSocket, order_id: str):
 
         await ws.send_json({"event": "started", "state": initial})
 
-        # Stream each LangGraph step
         async for step in rescue_graph.astream(initial):
             for node_name, node_state in step.items():
                 await ws.send_json({
@@ -1014,7 +868,7 @@ async def rescue_ws(ws: WebSocket, order_id: str):
                     "node":  node_name,
                     "state": node_state,
                 })
-                await asyncio.sleep(0.1)   # small breath for UI to animate
+                await asyncio.sleep(0.1)
 
         await ws.send_json({"event": "complete"})
         log.info(f"[WS] Rescue complete: order={order_id}")
@@ -1031,18 +885,10 @@ async def rescue_ws(ws: WebSocket, order_id: str):
             pass
 
 # ──────────────────────────────────────────────────────────────
-#  REST: TRANSCRIBE AUDIO  (Whisper)
+#  REST: TRANSCRIBE AUDIO (Whisper)
 # ──────────────────────────────────────────────────────────────
 @app.post("/api/transcribe")
 async def transcribe_audio(audio: UploadFile = File(...)):
-    """
-    Accepts audio blob from browser mic.
-    Transcribes with OpenAI Whisper (local, free, no API key needed).
-    Falls back to mock transcript if Whisper not installed.
-
-    Request: multipart/form-data with 'audio' field (webm/wav/mp3)
-    Response: {transcript, language, noise_detected, duration_secs}
-    """
     try:
         import whisper
 
@@ -1053,12 +899,12 @@ async def transcribe_audio(audio: UploadFile = File(...)):
             tmp.write(content)
             tmp_path = tmp.name
 
-        model = whisper.load_model("base")   # ~150MB, cached after first load
+        model = whisper.load_model("base")
         result = model.transcribe(
             tmp_path,
-            language="hi",     # auto-detect
+            language="hi",
             task="transcribe",
-            fp16=False,        # CPU-safe
+            fp16=False,
             initial_prompt="Aapka delivery address landmark ke saath batayein, Relay your Delivery Address with Landmark"
         )
 
@@ -1090,7 +936,7 @@ async def transcribe_audio(audio: UploadFile = File(...)):
         raise HTTPException(status_code=500, detail=str(e))
 
 # ──────────────────────────────────────────────────────────────
-#  REST: MOCK CALL  (simulates Exotel/Twilio IVR)
+#  REST: MOCK CALL
 # ──────────────────────────────────────────────────────────────
 class MockCallRequest(BaseModel):
     scenario: Literal["normal", "no_answer", "noise", "low_confidence"] = "normal"
@@ -1106,14 +952,7 @@ MOCK_TRANSCRIPTS = {
 
 @app.post("/api/mock-call")
 async def mock_call(req: MockCallRequest):
-    """
-    Simulates an IVR phone call result without needing Exotel/Twilio.
-    In production: replace this endpoint's return value with actual
-    Exotel webhook payload parsing.
-
-    Response: {answered, transcript, noise_detected, duration_secs}
-    """
-    await asyncio.sleep(1.2)   # simulate call duration
+    await asyncio.sleep(1.2)
     answered = req.scenario != "no_answer"
     return {
         "answered":        answered,
@@ -1125,24 +964,11 @@ async def mock_call(req: MockCallRequest):
     }
 
 # ──────────────────────────────────────────────────────────────
-#  SHARED HELPER — run the full LangGraph synchronously, keep trace
+#  SHARED HELPER — run full LangGraph
 # ──────────────────────────────────────────────────────────────
 async def _run_full_rescue(order_id: str, transcript: str, pincode: str = "",
                             city_hint: str = "", call_answered: bool = True,
                             state_hint: str = "", country_hint: str = "") -> dict:
-    """
-    Runs voice_agent -> spatial_agent -> route_agent (with internal
-    retry/escalate loop already wired into the graph) to completion.
-    Returns {"steps": [...], "final": {...}} — steps is the full
-    agent-by-agent trace, useful for showing "state handoff" in UI.
-    Used by both the Twilio recording callback and the manual/typed
-    address fallback, so both paths go through the identical agents.
-
-    state_hint / country_hint are optional — pass them when the caller
-    knows more than just the city (e.g. testing a US address end to
-    end), so the geocoder isn't stuck guessing the rest of the world
-    from a city name alone.
-    """
     initial: RescueState = {
         "order_id": order_id, "raw_address": transcript, "pincode": pincode,
         "city_hint": city_hint, "state_hint": state_hint, "country_hint": country_hint,
@@ -1164,25 +990,18 @@ async def _run_full_rescue(order_id: str, transcript: str, pincode: str = "",
     return {"steps": steps, "final": final_state}
 
 # ──────────────────────────────────────────────────────────────
-#  REST: MANUAL RESCUE  (typed-address fallback when Twilio is unavailable)
+#  REST: MANUAL RESCUE
 # ──────────────────────────────────────────────────────────────
 class ManualRescueRequest(BaseModel):
     order_id:  str
-    transcript: str        # the address text driver typed/selected
+    transcript: str
     pincode:   str = ""
     city_hint: str = ""
-    state_hint: str = ""     # NEW — optional state/province, any country
-    country_hint: str = ""   # NEW — optional country name/code, blank = search globally
+    state_hint: str = ""
+    country_hint: str = ""
 
 @app.post("/api/manual-rescue")
 async def manual_rescue(req: ManualRescueRequest):
-    """
-    Fallback path when Twilio calling isn't available/configured.
-    Feeds a typed address straight into the same agent graph used
-    by the real phone-call path, so the result is directly comparable.
-    Not restricted to any fixed set of cities — city_hint/state_hint/
-    country_hint are free text, so any address worldwide can be tested.
-    """
     result = await _run_full_rescue(
         order_id=req.order_id,
         transcript=req.transcript,
@@ -1197,11 +1016,8 @@ async def manual_rescue(req: ManualRescueRequest):
     return result
 
 # ──────────────────────────────────────────────────────────────
-#  TWILIO — real outbound call, recording, transcription, geocoding
+#  TWILIO ENDPOINTS
 # ──────────────────────────────────────────────────────────────
-# In-memory store of call results, keyed by CallSid. A dict is fine for
-# a hackathon prototype — swap for Redis if this ever needs to survive
-# a backend restart or run across multiple workers.
 _twilio_results: dict[str, dict] = {}
 
 def _twilio_env_ok() -> bool:
@@ -1215,7 +1031,7 @@ def _get_twilio_client():
     return Client(sid, token)
 
 class TwilioCallRequest(BaseModel):
-    to:         str    # phone number to call, E.164 format e.g. +919876543210
+    to:         str
     order_id:   str
     pincode:    str = ""
     city_hint:  str = ""
@@ -1224,7 +1040,6 @@ class TwilioCallRequest(BaseModel):
 
 @app.get("/api/twilio/status")
 async def twilio_status():
-    """Lets the frontend show whether real calling is configured before showing the Call tab."""
     return {"configured": _twilio_env_ok(),
             "missing": [k for k in ("TWILIO_ACCOUNT_SID", "TWILIO_AUTH_TOKEN",
                                      "TWILIO_PHONE_NUMBER", "PUBLIC_BASE_URL")
@@ -1232,11 +1047,6 @@ async def twilio_status():
 
 @app.post("/api/twilio/call")
 async def twilio_call(req: TwilioCallRequest):
-    """
-    Places a real outbound call via Twilio. Twilio requests TwiML from
-    /api/twilio/twiml when the call connects, which prompts and records
-    the response, then posts the recording to /api/twilio/recording-status.
-    """
     if not _twilio_env_ok():
         raise HTTPException(status_code=400, detail=(
             "Twilio not configured. Set TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, "
@@ -1254,8 +1064,6 @@ async def twilio_call(req: TwilioCallRequest):
             status_callback_event=["initiated", "ringing", "answered", "completed"],
             status_callback_method="POST",
         )
-        # Stash order context so the recording callback (which only gets
-        # CallSid, not order_id) can find its way back to the right order.
         _twilio_results[call.sid] = {
             "status": "calling", "order_id": req.order_id,
             "pincode": req.pincode, "city_hint": req.city_hint,
@@ -1270,11 +1078,6 @@ async def twilio_call(req: TwilioCallRequest):
 
 @app.post("/api/twilio/twiml")
 async def twilio_twiml():
-    """
-    Twilio fetches this the moment the call is answered. Returns TwiML
-    telling Twilio to prompt and record. recordingStatusCallback fires
-    when the recording is ready, separately, async.
-    """
     from fastapi.responses import Response
     base = os.environ.get("PUBLIC_BASE_URL", "").rstrip("/")
     twiml = f"""<?xml version="1.0" encoding="UTF-8"?>
@@ -1289,7 +1092,6 @@ async def twilio_twiml():
 
 @app.post("/api/twilio/call-status")
 async def twilio_call_status(request: Request):
-    """Optional: Twilio posts call lifecycle events here (ringing/answered/completed)."""
     form = await request.form()
     call_sid = form.get("CallSid", "")
     call_status = form.get("CallStatus", "")
@@ -1300,23 +1102,23 @@ async def twilio_call_status(request: Request):
 
 @app.post("/api/twilio/recording-status")
 async def twilio_recording_status(request: Request, background_tasks: BackgroundTasks):
-    """
+"""
     Twilio posts here once the recording is ready. We download the
     audio, transcribe with Whisper, then run the full agent graph —
     all in a background task so we can return 200 to Twilio immediately.
     """
     form = await request.form()
     call_sid = form.get("CallSid", "")
-    recording_url = form.get("RecordingUrl", "")  # base URL, needs .wav/.mp3 suffix + auth
+    recording_url = form.get("RecordingUrl", "")
 
     if not recording_url or call_sid not in _twilio_results:
-        return {"ok": True}  # ack anyway so Twilio doesn't retry forever
+        return {"ok": True}
 
     background_tasks.add_task(_process_twilio_recording, call_sid, recording_url)
     return {"ok": True}
 
 async def _process_twilio_recording(call_sid: str, recording_url: str):
-    """
+"""
     Each stage below writes its own status + timestamp into _twilio_results
     IMMEDIATELY, rather than batching everything into one update at the end.
     /api/twilio/result/{call_sid} is polled by the frontend every ~1.2s, so
@@ -1342,15 +1144,11 @@ async def _process_twilio_recording(call_sid: str, recording_url: str):
             tmp.write(audio_bytes)
             tmp_path = tmp.name
 
-        # Record + Whisper, not Twilio's built-in speech recognition —
-        # better accuracy on Hindi/Bhojpuri/Maithili, and Whisper's
-        # multilingual auto-detect (language="hi") means the customer can
-        # say ANY address in ANY language — nothing here is India-locked.
         publish(status="transcribing", status_message="🧠 Transcribing audio with Whisper...")
         try:
             import whisper
             model = whisper.load_model("base")
-            result = model.transcribe(tmp_path, language="hi", task="transcribe", fp16=False,initial_prompt="Hanuman mandir ke paas, bus stand wali gali. Near landmark.")
+            result = model.transcribe(tmp_path, language="hi", task="transcribe", fp16=False, initial_prompt="Hanuman mandir ke paas, bus stand wali gali. Near landmark.")
             transcript = result["text"].strip()
             detected_lang = result.get("language", "")
         except ImportError:
@@ -1364,9 +1162,6 @@ async def _process_twilio_recording(call_sid: str, recording_url: str):
             publish(status="error", error="Empty transcript — check Whisper install / call audio.")
             return
 
-        # Publish the transcript THE MOMENT it's ready — don't wait for
-        # geocoding to finish. This is what makes the transcript show up
-        # live, before the pin lands on the map.
         publish(
             status="transcribed",
             transcript=transcript,
@@ -1391,26 +1186,22 @@ async def _process_twilio_recording(call_sid: str, recording_url: str):
 
 @app.get("/api/twilio/result/{call_sid}")
 async def twilio_result(call_sid: str):
-    """Frontend polls this every ~1.5s after placing a call."""
     if call_sid not in _twilio_results:
         raise HTTPException(status_code=404, detail="Unknown call_sid")
     return _twilio_results[call_sid]
 
 # ──────────────────────────────────────────────────────────────
-#  REST: GEOCODE DIRECT  (for testing spatial agent standalone)
+#  REST: GEOCODE DIRECT
 # ──────────────────────────────────────────────────────────────
 class GeocodeRequest(BaseModel):
     landmarks: list[str]
     pincode:   str = ""
     city:      str = ""
     state:     str = ""
-    country:   str = ""   # optional ISO code (e.g. "us"); blank = search globally
+    country:   str = ""
 
 @app.post("/api/geocode")
 async def geocode_direct(req: GeocodeRequest):
-    """
-    Test the spatial agent's geocoding directly without running full graph.
-    """
     local = _local_search(req.landmarks, req.pincode, req.city)
     if local and local.get("confidence", 0) >= 0.35:
         return {"source": "local_db", "result": local}
@@ -1433,7 +1224,7 @@ async def health():
     return {
         "status":            "ok",
         "landmarks_loaded":  len(_landmark_index),
-        "gemini_key_set":    bool(os.environ.get("GEMINI_API_KEY")),
+        "groq_key_set":      bool(os.environ.get("GROQ_API_KEY")),
         "graph_nodes":       ["voice_agent", "spatial_agent", "route_agent", "escalate"],
         "osm_enabled":       True,
         "whisper_available": _check_whisper(),
@@ -1446,9 +1237,8 @@ def _check_whisper() -> bool:
     except ImportError:
         return False
 
-
 # ──────────────────────────────────────────────────────────────
-#  REST: LIST LANDMARKS  (for map preview in frontend)
+#  REST: LIST LANDMARKS
 # ──────────────────────────────────────────────────────────────
 @app.get("/api/landmarks")
 async def list_landmarks(state: str = "", city: str = ""):
@@ -1473,7 +1263,6 @@ async def list_landmarks(state: str = "", city: str = ""):
         ]
     }
 
-
 @app.get("/", response_class=HTMLResponse)
 def read_root():
     html_path = os.path.join(os.path.dirname(__file__), "index.html")
@@ -1487,13 +1276,11 @@ def read_root():
 import uvicorn
 
 if __name__ == "__main__":
-    # Render automatically PORT env variable deta hai, agar local chala rahe hain toh 8000 use hoga
     port = int(os.environ.get("PORT", 8000))
-    
     uvicorn.run(
         "backend:app",
-        host="0.0.0.0",  # Isko 127.0.0.1 se badal kar 0.0.0.0 kar dein
-        port=port,       # Isko dynamic port kar dein
-        reload=False,     # Production (Render) par reload=False hona chahiye
+        host="0.0.0.0",
+        port=port,
+        reload=False,
         log_level="info",
     )
