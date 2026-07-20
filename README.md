@@ -88,8 +88,9 @@ A static geocoder returns the first result. Our system **detects ambiguity, show
 
 ## 3. Our Solution
 
-A **3-agent agentic AI system** orchestrated by LangGraph:
 *Switched to Grok due to credit limit.*
+
+A **3-agent agentic AI system** orchestrated by LangGraph:
 *Real-time voice → GPS resolution*
 ```
 Driver taps "Address Unclear"
