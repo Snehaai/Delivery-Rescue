@@ -141,7 +141,7 @@ def _fuzzy_ratio(query_landmarks: list[str], row: dict) -> float:
 def _local_search(landmarks: list[str], pincode: str, city: str,
                    directions: list = None, identifiers: list = None,
                    extraction_hint: str = "medium") -> dict:
-                     """
+    """
     Generic fuzzy-match against the landmark CSV.
     Returns the best match dict or {} with a confidence score.
     Scoring logic:
@@ -1102,7 +1102,7 @@ async def twilio_call_status(request: Request):
 
 @app.post("/api/twilio/recording-status")
 async def twilio_recording_status(request: Request, background_tasks: BackgroundTasks):
-"""
+    """
     Twilio posts here once the recording is ready. We download the
     audio, transcribe with Whisper, then run the full agent graph —
     all in a background task so we can return 200 to Twilio immediately.
@@ -1118,7 +1118,7 @@ async def twilio_recording_status(request: Request, background_tasks: Background
     return {"ok": True}
 
 async def _process_twilio_recording(call_sid: str, recording_url: str):
-"""
+    """
     Each stage below writes its own status + timestamp into _twilio_results
     IMMEDIATELY, rather than batching everything into one update at the end.
     /api/twilio/result/{call_sid} is polled by the frontend every ~1.2s, so
