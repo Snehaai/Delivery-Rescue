@@ -27,6 +27,8 @@ ScriptedByHer[2.0] | Theme: Building for Bharat with Agentic AI
 14. [Demo Scenarios](#14-demo-scenarios)
 15. [Edge Cases Handled](#15-edge-cases-handled)
 
+
+*Switched to Grok due to credit limit.*
 ---
 
 ## 1. Project Overview
@@ -87,6 +89,7 @@ A static geocoder returns the first result. Our system **detects ambiguity, show
 ## 3. Our Solution
 
 A **3-agent agentic AI system** orchestrated by LangGraph:
+*Switched to Grok due to credit limit.*
 *Real-time voice → GPS resolution*
 ```
 Driver taps "Address Unclear"
@@ -102,7 +105,7 @@ Driver taps "Address Unclear"
 │  │   dialect   │    │ • Fuzzy      │    │   auto-  │   │
 │  │ • Whisper   │    │ • OSM fallbk │    │   push   │   │
 │  │   ASR       │    │ • Ambiguity  │    │ • 50-75% │   │
-│  │ • Gemini    │    │   detection  │    │   flag   │   │
+│  │ • Grok      │    │   detection  │    │   flag   │   │
 │  │   extract   │    │ • Confidence │    │ • <50%   │   │
 │  └─────────────┘    │   scoring    │    │   retry  │   │
 │         ▲           └──────────────┘    └──────────┘   │
@@ -169,7 +172,7 @@ Driver's map pin updates. Delivery saved.
 │  • /api/health            — System status            │
 │                                                      │
 │  Integrations:                                       │
-│  • Gemini API (Landmark extraction)                  │
+│  • Grok   API (Landmark extraction)                  │
 │  • Whisper (Speech → Text)                           │
 │  • OSM Nominatim (Geocoding fallback)                │
 │  • Twilio (Real phone calls, optional)               │
@@ -258,7 +261,8 @@ This forces a retry where the Voice Agent asks a more specific question.
 
 ### Layer 2: LLM Self-Confidence (New — Previously Unused)
  
-Gemini now **reports its own extraction confidence** in the JSON response:
+Grok now **reports its own extraction confidence** in the JSON response:
+*Switched to Grok due to credit limit.*
  
 | Hint | Value | When |
 |---|---|---|
@@ -313,7 +317,7 @@ START
 voice_agent
   • Call customer (Twilio or mock)
   • Whisper transcription
-  • Gemini landmark extraction + hint
+  • Grok landmark extraction + hint
   • Noise cleaning
   │
   ▼
@@ -346,7 +350,7 @@ sequenceDiagram
     actor Driver as Delivery Driver
     participant Frontend as Frontend (Browser)
     participant Backend as Backend (FastAPI)
-    participant Gemini as Gemini API
+    participant Grok as Grok API
     participant OSM as OpenStreetMap
     participant Whisper as Whisper (Local)
  
@@ -373,8 +377,8 @@ sequenceDiagram
     
     Backend->>Backend: Run LangGraph rescue
     Note over Backend: voice_agent: extract landmarks + hint
-    Backend->>Gemini: Gemini prompt: extract landmarks, directions, identifiers
-    Gemini-->>Backend: {landmarks, directions, identifiers, confidence_hint}
+    Backend->>Grok: Grok prompt: extract landmarks, directions, identifiers
+    Grok-->>Backend: {landmarks, directions, identifiers, confidence_hint}
     
     Note over Backend: spatial_agent: blend confidence
     Backend->>Backend: Fuzzy search landmarks.csv
@@ -397,8 +401,8 @@ sequenceDiagram
     Frontend->>Backend: POST /api/manual-rescue {transcript, pincode, city}
     
     Backend->>Backend: Run LangGraph (same agents, no call)
-    Backend->>Gemini: Extract landmarks + hint
-    Gemini-->>Backend: {landmarks, directions, identifiers, confidence_hint}
+    Backend->>Grok: Extract landmarks + hint
+    Grok-->>Backend: {landmarks, directions, identifiers, confidence_hint}
     Backend->>Backend: Fuzzy search + blend confidence
     Backend-->>Frontend: {steps, final}
     Frontend->>Frontend: Map + confidence updated
@@ -420,7 +424,7 @@ sequenceDiagram
     participant Twilio as Twilio
     participant Backend as Backend
     participant Whisper as Whisper Local Model
-    participant LLM as Gemini API
+    participant LLM as Grok API
  
     Speaker->>Twilio: Speaks address: "Panchayat bhawan ke peeche..."
     Twilio->>Twilio: Record audio (max 30s, auto-trim silence)
@@ -492,7 +496,7 @@ delivery-rescue/
 | 51–120 | Landmark loading | CSV → token index for fuzzy search |
 | 125–290 | `_fuzzy_ratio()` & `_local_search()` | Fuzzy matching + 3-layer confidence blend |
 | 295–325 | `RescueState` TypedDict | Shared state schema |
-| 327–495 | `voice_agent()` | Call, transcription, Gemini extraction, confidence_hint |
+| 327–495 | `voice_agent()` | Call, transcription, Grok extraction, confidence_hint |
 | 497–660 | `spatial_agent()` | Fuzzy search, ambiguity detection, blended confidence |
 | 662–750 | `route_agent()` | Threshold gates, push/flag/retry/escalate logic |
 | 752–800 | `/api/twilio/call` | Outbound Twilio call endpoint |
@@ -581,7 +585,7 @@ If 2+ results within 0.12 of each other → AMBIGUOUS → confidence *= 0.55
 | **FastAPI** | 0.115 | Web framework + WebSocket | Async-native, auto API docs, fastest Python web framework |
 | **LangGraph** | 0.2.28 | Multi-agent orchestration | State machine + conditional routing + loops — only framework that does this properly |
 | **langchain-core** | 0.3.8 | LangGraph dependency | Provides base types and utilities |
-| **Google AI Stidio** | 1.30.0 | Gemini API client | Gemini Flash is fast and cheap for landmark extraction |
+| **Grok API** | 1.30.0 | Grok API client | Grok is fast and cheap for landmark extraction |
 | **httpx** | 0.27.2 | Async HTTP client | Used for OSM Nominatim requests |
 | **uvicorn** | 0.30.6 | ASGI server | Runs FastAPI, supports WebSocket natively |
 | **pydantic** | 2.9.2 | Data validation | FastAPI uses this internally; we use for request models |
@@ -604,7 +608,7 @@ If 2+ results within 0.12 of each other → AMBIGUOUS → confidence *= 0.55
 | **OpenStreetMap Nominatim** | Geocoding fallback | Free, no key needed |
 | **landmarks.csv** | Primary geocoding | Free, self-maintained |
 | **Census India 2011** | Coordinate verification source | Free public data |
-| **Gemini API (Google AI Studio)** | Pay-as-you-go | Landmark extraction |
+| **Grok API** | Pay-as-you-go | Landmark extraction |
 
 ### Why LangGraph specifically?
 
@@ -650,12 +654,12 @@ venv\Scripts\activate           # Windows
 pip install -r requirements.txt
 ```
  
-### Step 3: Set Gemini API Key
+### Step 3: Set Grok API Key
  
 ```bash
-export GEMINI_API_KEY=sk-ant-YOUR-KEY-HERE    # Mac/Linux
+export GROK_API_KEY=sk-ant-YOUR-KEY-HERE    # Mac/Linux
 # or
-set GEMINI_API_KEY=sk-ant-YOUR-KEY-HERE       # Windows
+set GROK_API_KEY=sk-ant-YOUR-KEY-HERE       # Windows
 ```
  
 Get key at: https://aistudio.google.com/ → API Keys
@@ -693,7 +697,7 @@ Should return:
 {
   "status": "ok",
   "landmarks_loaded": 39,
-  "gemini_key_set": true,
+  "Grok_key_set": true,
   "graph_nodes": ["voice_agent", "spatial_agent", "route_agent", "escalate"],
   "osm_enabled": true
 }
@@ -814,7 +818,7 @@ Response:
 {
   "status": "ok",
   "landmarks_loaded": 39,
-  "gemini_key_set": true,
+  "grok_key_set": true,
   "graph_nodes": ["voice_agent", "spatial_agent", "route_agent", "escalate"],
   "osm_enabled": true,
   "whisper_available": false
