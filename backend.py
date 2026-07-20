@@ -70,12 +70,6 @@ LANDMARK_CSV = Path(__file__).parent / "landmarks.csv"
 _landmark_index: list[dict] = []   # list of landmark dicts
 
 def load_landmarks() -> list[dict]:
-    """
-    Loads landmarks.csv into memory.
-    Each row → a landmark dict with all CSV fields.
-    Builds a fast lookup index: all text tokens → landmark.
-    Called once at startup.
-    """
     if not LANDMARK_CSV.exists():
         log.warning(f"landmarks.csv not found at {LANDMARK_CSV}. Using empty DB.")
         return []
@@ -121,12 +115,6 @@ def _haversine(lat1, lng1, lat2, lng2) -> float:
 _HINT_TO_NUMERIC = {"high": 0.90, "medium": 0.60, "low": 0.30}
 
 def _fuzzy_ratio(query_landmarks: list[str], row: dict) -> float:
-    """
-    Best fuzzy string similarity between any spoken landmark phrase and
-    this row's name/aliases, using difflib (stdlib — no extra dependency).
-    Catches spelling/transliteration drift ('mandhir' vs 'mandir', 'panchmukhi'
-    vs 'panchmuki') that exact token-overlap matching completely misses.
-    """
     names = [row.get("landmark_name", ""), row.get("alias_1", ""), row.get("alias_2", "")]
     names = [n.lower() for n in names if n]
     best = 0.0
@@ -139,25 +127,8 @@ def _fuzzy_ratio(query_landmarks: list[str], row: dict) -> float:
     return best
 
 def _local_search(landmarks: list[str], pincode: str, city: str,
-                   directions: list = None, identifiers: list = None,
-                   extraction_hint: str = "medium") -> dict:
-    """
-    Generic fuzzy-match against the landmark CSV.
-    Returns the best match dict or {} with a confidence score.
-    Scoring logic:
-      +0.35  max(exact landmark-name token overlap, fuzzy string ratio)
-      +0.15  alias match
-      +0.25  pincode matches
-      +0.15  city/district matches
-      -0.10  each ambiguity_note mention of 'multiple' or 'ambiguous'
-    After the structural score is computed, it is blended with two signals
-    the LLM extraction step already produces but previously went unused:
-      - extraction_hint: "high/medium/low" self-assessment
-      - clue richness: how many directional/visual clues the customer gave
-        (more detail volunteered generally means a more reliable transcript)
-    If multiple rows get a close score → ambiguity detected → confidence halved
-    (this remains a safety brake, not a fix — see spatial_agent candidates list).
-    """
+                  directions: list = None, identifiers: list = None,
+                  extraction_hint: str = "medium") -> dict:
     if not _landmark_index:
         return {}
 
@@ -185,30 +156,30 @@ def _local_search(landmarks: list[str], pincode: str, city: str,
         if overlap == 0 and fuzzy < 0.55:
             continue
 
-        # Landmark name match — take whichever signal is stronger, exact
-        # token overlap or fuzzy string similarity, rather than requiring
-        # an exact match. Fixes false negatives from spelling variants.
-
         lm_name_tokens = set(re.split(r"[\s,/\-]+", row["landmark_name"].lower()))
         lm_overlap = len(query_tokens & lm_name_tokens)
         exact_component = 0.35 * (lm_overlap / max(len(lm_name_tokens), 1)) if lm_overlap else 0.0
         fuzzy_component = 0.35 * fuzzy
         score += max(exact_component, fuzzy_component)
-#alias match
+
+        # Alias match
         for alias_col in ["alias_1", "alias_2"]:
             alias = row.get(alias_col, "")
             if alias:
                 alias_tokens = set(re.split(r"[\s,/\-]+", alias.lower()))
                 if query_tokens & alias_tokens:
                     score += 0.15
-#pincode match
+
+        # Pincode match
         if pincode and pincode.strip() == row.get("pincode", "").strip():
             score += 0.25
-#city/district match
+
+        # City/district match
         city_tokens = set(re.split(r"[\s,/\-]+", (row.get("city","") + " " + row.get("district","")).lower()))
         if query_tokens & city_tokens:
             score += 0.15
-# Ambiguity penalty — if the CSV note says there are multiple
+
+        # Ambiguity penalty
         note = row.get("ambiguity_note", "").lower()
         if any(w in note for w in ["multiple", "ambiguous", "different", "3 ", "4 ", "several"]):
             score -= 0.10
@@ -221,15 +192,10 @@ def _local_search(landmarks: list[str], pincode: str, city: str,
 
     scored.sort(key=lambda x: x[0], reverse=True)
     top_score, top_row = scored[0]
-# Detect ambiguity using the RAW structural scores, before any blending —
-    # ambiguity is a property of the data (multiple similarly-named places),
-    # not of how confident the LLM felt.
 
     close_matches = [s for s, _ in scored if s >= top_score - 0.12]
     ambiguous = len(close_matches) > 1
-# Blend in the two previously-unused signals:
-    #   - Gemini's own confidence in what it extracted
-    #   - how much distinguishing detail the customer actually gave
+
     hint_val = _HINT_TO_NUMERIC.get(extraction_hint, 0.6)
     clue_bonus = min(0.02 * (len(directions) + len(identifiers)), 0.08)
     top_score = 0.75 * top_score + 0.15 * hint_val + clue_bonus
@@ -238,9 +204,6 @@ def _local_search(landmarks: list[str], pincode: str, city: str,
     if ambiguous:
         top_score *= 0.55
         log.info(f"Ambiguity detected: {len(close_matches)} close matches. Confidence halved.")
-      # Surface the actual candidates so the UI can plot all of them on the
-        # map and let the driver pick the right one visually, rather than the
-        # system silently guessing or making the customer repeat themselves.
         candidates = [
             {
                 "lat": row["lat"], "lng": row["lng"],
@@ -280,13 +243,6 @@ async def _nominatim_rate_limit():
         _nominatim_last_call = time.monotonic()
 
 async def _locationiq_search(query: str, pincode: str = "", country: str = "") -> dict:
-    """
-    Optional higher-throughput free provider. Same underlying OSM data as
-    Nominatim, but LocationIQ's free tier (5,000 req/day, no card needed)
-    isn't limited to 1 req/sec. No-op (returns {}) if no key is configured
-    — Nominatim below still works standalone, this is purely additive.
-    Get a free key at https://locationiq.com and set LOCATIONIQ_API_KEY.
-    """
     key = os.environ.get("LOCATIONIQ_API_KEY", "")
     if not key:
         return {}
@@ -325,12 +281,6 @@ async def _locationiq_search(query: str, pincode: str = "", country: str = "") -
         return {}
 
 async def _osm_search(query: str, pincode: str = "", country: str = "in") -> dict:
-    """
-    Global geocoder — tries LocationIQ first if configured (no rate-limit
-    worries), then falls back to Nominatim (always free, self-throttled
-    to 1 req/sec here so we never violate OSM's usage policy).
-    an India-only filter.
-    """
     country = "in"
     liq = await _locationiq_search(query, pincode, country)
     if liq:
@@ -366,8 +316,6 @@ async def _osm_search(query: str, pincode: str = "", country: str = "in") -> dic
             return {}
         top = results[0]
         raw_conf = float(top.get("importance", 0.3))
-       # Cap scales with candidate count instead of one flat number —
-        # than a rural area returning 5 loosely-matching results.
         cap = 0.80 if len(results) <= 2 else 0.65
         osm_conf = min(raw_conf * 0.85, cap)
         return {
@@ -426,14 +374,6 @@ class RescueState(TypedDict):
 #  NODE 1  —  VOICE AGENT (USING GROQ LLAMA-3.1)
 # ──────────────────────────────────────────────────────────────
 async def voice_agent(state: RescueState) -> dict:
-  """
-    Responsibilities:
-      1. Simulate / receive phone call result
-      2. Detect and clean background noise from transcript
-      3. Use Gemini to extract structured landmark info from natural speech
-      4. Handle fallback (WhatsApp) if call unanswered
-      5. Guard against empty/too-short transcripts
-    """
     updates: dict = {"status": "voice_processing"}
 
     if state["retry_count"] >= 3:
@@ -446,7 +386,8 @@ async def voice_agent(state: RescueState) -> dict:
 
     transcript = state.get("audio_transcript", "").strip()
     call_answered = state.get("call_answered", True)
- # ── Handle no-answer scenario ──────────────────────────────
+
+    # ── Handle no-answer scenario ──────────────────────────────
     if not call_answered and not state.get("fallback_triggered"):
         updates["fallback_triggered"] = True
         updates["status_message"] = "📵 No answer. Sending WhatsApp voice note in local dialect..."
@@ -460,7 +401,8 @@ async def voice_agent(state: RescueState) -> dict:
             }
         updates["call_answered"] = True
         updates["status_message"] = "✅ Customer replied via WhatsApp."
-# ── Noise detection and cleaning ───────────────────────────
+
+    # ── Noise detection and cleaning ───────────────────────────
     noise_markers = ["[noise]", "[inaudible]", "[static]", "[background]", "..."]
     raw_noise = any(m in transcript.lower() for m in noise_markers)
 
@@ -477,7 +419,8 @@ async def voice_agent(state: RescueState) -> dict:
     else:
         updates["noise_detected"] = False
         updates["noise_cleaned"] = False
- # Transcript too short even after cleaning
+
+    # Transcript too short even after cleaning
     if len(transcript.strip()) < 5:
         return {
             **updates,
@@ -508,8 +451,8 @@ Return ONLY a valid JSON object, no markdown, no explanation:
   "inferred_city": "best guess of city/town from context or empty string",
   "inferred_state": "best guess of state/province from context or empty string",
   "inferred_country": "best guess of country or empty string",
-  "clarification_needed": true/false,
-  "clarification_question": "one short question (in the same language the customer used) that would resolve ambiguity; empty if not needed",
+  "clarification_needed": false,
+  "clarification_question": "one short question that would resolve ambiguity; empty if not needed",
   "confidence_hint": "high/medium/low"
 }}"""
 
@@ -1102,11 +1045,6 @@ async def twilio_call_status(request: Request):
 
 @app.post("/api/twilio/recording-status")
 async def twilio_recording_status(request: Request, background_tasks: BackgroundTasks):
-    """
-    Twilio posts here once the recording is ready. We download the
-    audio, transcribe with Whisper, then run the full agent graph —
-    all in a background task so we can return 200 to Twilio immediately.
-    """
     form = await request.form()
     call_sid = form.get("CallSid", "")
     recording_url = form.get("RecordingUrl", "")
@@ -1118,14 +1056,6 @@ async def twilio_recording_status(request: Request, background_tasks: Background
     return {"ok": True}
 
 async def _process_twilio_recording(call_sid: str, recording_url: str):
-    """
-    Each stage below writes its own status + timestamp into _twilio_results
-    IMMEDIATELY, rather than batching everything into one update at the end.
-    /api/twilio/result/{call_sid} is polled by the frontend every ~1.2s, so
-    the driver actually sees "downloading" -> "transcribing" -> transcript
-    text appear -> "geocoding" -> pin drop, as distinct visible steps,
-    instead of a long silence followed by one final result.
-    """
     ctx = _twilio_results.get(call_sid, {})
 
     def publish(**fields):
