@@ -60,7 +60,6 @@ class GroqCircuitBreaker:
         self.recovery_time = recovery_time
         self.failure_count = 0
         self.state = "CLOSED"  # CLOSED, OPEN
-
         self.last_state_change = 0.0
 
     def can_execute(self) -> bool:
@@ -100,7 +99,7 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-# Groq Client Initialization
+
 def get_groq():
     key = os.getenv("GROQ_API_KEY")
     if not key:
@@ -292,7 +291,7 @@ async def _locationiq_search(query: str, pincode: str = "", country: str = "") -
         return {}
     params = {
         "key": key,
-        "q": query + (f" {pincode}" if pincode else ""),
+        "q": query + (f", {pincode}" if pincode else ""),
         "format": "json",
         "limit": 5,
         "addressdetails": 1,
@@ -314,7 +313,7 @@ async def _locationiq_search(query: str, pincode: str = "", country: str = "") -
             "lng": float(top["lon"]),
             "display_name": top.get("display_name", "")[:160],
             "source": "locationiq",
-            "confidence": round(min(raw_conf * 0.85, 0.85), 3),
+            "confidence": round(max(raw_conf, 0.70), 3),
             "total_matches": len(results),
             "ambiguous": len(results) > 2,
             "osm_class": top.get("class", ""),
@@ -331,9 +330,12 @@ async def _osm_search(query: str, pincode: str = "", country: str = "in") -> dic
 
     await _nominatim_rate_limit()
 
-    search_query = query
-    if pincode:
-        search_query += f", {pincode}"
+    # Build clean structured query with commas for OpenStreetMap
+    query_parts = [p.strip() for p in query.split(",") if p and p.strip()]
+    if pincode and pincode.strip() not in query_parts:
+        query_parts.append(pincode.strip())
+    
+    search_query = ", ".join(query_parts)
 
     params = {
         "q": search_query,
@@ -358,17 +360,19 @@ async def _osm_search(query: str, pincode: str = "", country: str = "in") -> dic
         if not results:
             return {}
         top = results[0]
-        raw_conf = float(top.get("importance", 0.3))
-        cap = 0.80 if len(results) <= 2 else 0.65
-        osm_conf = min(raw_conf * 0.85, cap)
+        raw_conf = float(top.get("importance", 0.35))
+        
+        # Give strong default baseline for valid OSM hits
+        osm_conf = max(raw_conf * 1.2, 0.75)
+        
         return {
             "lat": float(top["lat"]),
             "lng": float(top["lon"]),
-            "display_name": top.get("display_name", "")[:120],
+            "display_name": top.get("display_name", "")[:160],
             "source": "openstreetmap",
-            "confidence": round(osm_conf, 3),
+            "confidence": round(min(osm_conf, 0.90), 3),
             "total_matches": len(results),
-            "ambiguous": len(results) > 2,
+            "ambiguous": len(results) > 3,
             "osm_class": top.get("class", ""),
             "osm_type": top.get("type", ""),
         }
@@ -389,7 +393,7 @@ class RescueState(TypedDict):
     language:               str
 
     call_answered:          bool
-    fallback_triggered:     bool
+    fallback_triggered:      bool
     audio_transcript:       str
     noise_detected:         bool
     noise_cleaned:          bool
@@ -414,7 +418,7 @@ class RescueState(TypedDict):
     error_log:              list
 
 # ──────────────────────────────────────────────────────────────
-#  NODE 1  —  VOICE AGENT (WITH CIRCUIT BREAKER + SECRET MASKING)
+#  NODE 1  —  VOICE AGENT
 # ──────────────────────────────────────────────────────────────
 async def voice_agent(state: RescueState) -> dict:
     updates: dict = {"status": "voice_processing"}
@@ -430,7 +434,6 @@ async def voice_agent(state: RescueState) -> dict:
     transcript = state.get("audio_transcript", "").strip()
     call_answered = state.get("call_answered", True)
 
-  # ── Handle no-answer scenario ──────────────────────────────
     if not call_answered and not state.get("fallback_triggered"):
         updates["fallback_triggered"] = True
         updates["status_message"] = "📵 No answer. Sending WhatsApp voice note in local dialect..."
@@ -444,7 +447,7 @@ async def voice_agent(state: RescueState) -> dict:
             }
         updates["call_answered"] = True
         updates["status_message"] = "✅ Customer replied via WhatsApp."
-# ── Noise detection and cleaning ───────────────────────────
+
     noise_markers = ["[noise]", "[inaudible]", "[static]", "[background]", "..."]
     raw_noise = any(m in transcript.lower() for m in noise_markers)
 
@@ -462,18 +465,17 @@ async def voice_agent(state: RescueState) -> dict:
         updates["noise_detected"] = False
         updates["noise_cleaned"] = False
 
-    if len(transcript.strip()) < 5:
+    if len(transcript.strip()) < 3:
         return {
             **updates,
             "retry_count": state["retry_count"] + 1,
             "status_message": "🔄 Transcript too short. Re-prompting customer for landmark...",
-            "error_log": state["error_log"] + [f"Retry {state['retry_count']+1}: transcript under 5 chars"],
+            "error_log": state["error_log"] + [f"Retry {state['retry_count']+1}: transcript under 3 chars"],
         }
 
     updates["audio_transcript"] = transcript
     updates["status_message"] = "🧠 Extracting landmarks..."
 
-    # ── Groq LLM extraction with Circuit Breaker ──────────────
     if not groq_breaker.can_execute():
         log.warning(f"[{state['order_id']}] Groq Circuit Breaker is OPEN. Bypassing LLM call.")
         return _apply_keyword_fallback(state, updates, transcript, "Circuit Breaker OPEN")
@@ -534,7 +536,7 @@ Return ONLY a valid JSON object, no markdown, no explanation:
 
         updates["extraction_confidence_hint"] = conf_hint
         updates["status_message"]         = (
-            f"📍 Extracted: {', '.join(landmarks[:2]) or 'no clear landmark'}"
+            f"📍 Extracted: {', '.join(landmarks[:2]) or transcript}"
             + (f" | City inferred: {updates['inferred_city']}" if updates['inferred_city'] else "")
             + (" | ⚠️ Clarification needed" if needs_clarif else "")
         )
@@ -555,6 +557,7 @@ def _apply_keyword_fallback(state: RescueState, updates: dict, transcript: str, 
         "bhawan": "bhawan", "dukaan": "store", "station": "station",
         "bazar": "bazar", "chowk": "chowk", "hospital": "hospital",
         "thana": "police station", "panchayat": "panchayat bhawan",
+        "valley": "valley", "villa": "villa", "society": "society",
     }
     found = []
     for word in transcript.lower().split():
@@ -562,14 +565,14 @@ def _apply_keyword_fallback(state: RescueState, updates: dict, transcript: str, 
             if kw in word and label not in found:
                 found.append(label)
 
-    updates["extracted_landmarks"]   = found or [transcript[:60]]
+    updates["extracted_landmarks"]   = [transcript.strip()] if not found else found
     updates["extracted_directions"]  = []
     updates["extracted_identifiers"] = []
     updates["inferred_city"]         = state.get("city_hint", "")
     updates["state_hint"]            = state.get("state_hint", "")
     updates["country_hint"]          = state.get("country_hint", "")
-    updates["extraction_confidence_hint"] = "low"
-    updates["status_message"]         = f"🔑 Keyword fallback used. Found: {found}"
+    updates["extraction_confidence_hint"] = "medium"
+    updates["status_message"]         = f"🔑 Keyword fallback used. Extracted: {updates['extracted_landmarks']}"
     updates["error_log"]              = state["error_log"] + [f"LLM error: {err_msg[:80]}"]
     return updates
 
@@ -594,24 +597,15 @@ async def spatial_agent(state: RescueState) -> dict:
     conf_hint   = state.get("extraction_confidence_hint", "medium")
 
     if not landmarks:
-        return {
-            **updates,
-            "geocode_result": {},
-            "confidence_score": 0.0,
-            "confidence_reason": "No landmarks extracted from transcript",
-            "ambiguity_detected": False,
-            "candidate_count": 0,
-            "error_log": state["error_log"] + ["Spatial: empty landmark list"],
-        }
+        landmarks = [state.get("audio_transcript", "")]
 
+    # 1. Local Search First
     local_result = _local_search(landmarks, pincode, city, directions, identifiers, conf_hint)
 
     if local_result and local_result.get("confidence", 0) >= 0.35:
         conf = local_result["confidence"]
         if noise:
-            conf *= 0.82
-        if retry > 0:
-            conf = min(conf, 0.72)
+            conf *= 0.90
         if local_result.get("ambiguous"):
             conf = min(conf, 0.55)
             reason = f"Ambiguous: {local_result.get('total_matches', '?')} candidates with similar names."
@@ -630,25 +624,40 @@ async def spatial_agent(state: RescueState) -> dict:
         })
         return updates
 
-    osm_query = " ".join(landmarks[:2])
-    for part in (city, state_hint, country_hint):
-        if part:
-            osm_query += " " + part
+    # 2. OSM Search with Structured Comma-Separated Format
+    query_parts = []
+    if landmarks:
+        query_parts.append(", ".join(landmarks))
+    if city:
+        query_parts.append(city)
+    if state_hint:
+        query_parts.append(state_hint)
+    if country_hint:
+        query_parts.append(country_hint)
 
-    osm_result = await _osm_search(osm_query, pincode, country="")
+    osm_query = ", ".join([p for p in query_parts if p.strip()])
+
+    osm_result = await _osm_search(osm_query, pincode, country="in")
 
     if osm_result:
-        conf = osm_result.get("confidence", 0.3)
+        conf = osm_result.get("confidence", 0.70)
+        
+        # SMART BOOST: Check if primary landmark tokens exist in display_name
+        osm_display = osm_result.get("display_name", "").lower()
+        matched_landmarks = [lm for lm in landmarks if lm.lower().strip() in osm_display]
+        
+        if matched_landmarks:
+            conf = max(conf, 0.85) # High confidence when primary landmark exists in output
+
         if noise:
-            conf *= 0.80
-        if retry > 0:
-            conf = min(conf, 0.60)
+            conf *= 0.90
+
         osm_result["confidence"] = round(conf, 3)
 
         updates.update({
             "geocode_result":    osm_result,
             "confidence_score":  round(conf, 3),
-            "confidence_reason": f"OpenStreetMap fallback",
+            "confidence_reason": f"OpenStreetMap match for {osm_query}",
             "ambiguity_detected": osm_result.get("ambiguous", False),
             "candidate_count":   osm_result.get("total_matches", 1),
             "status_message":    f"🌐 OSM match: {osm_result.get('display_name','')[:60]} — {conf:.0%}",
@@ -747,7 +756,6 @@ async def escalate_node(state: RescueState) -> dict:
 # ──────────────────────────────────────────────────────────────
 #  CONDITIONAL EDGE — orchestrator routing logic
 # ──────────────────────────────────────────────────────────────
-
 def routing_decision(state: RescueState) -> str:
     action  = state.get("action_taken", "")
     status  = state.get("status", "")
@@ -818,7 +826,6 @@ async def _run_full_rescue(order_id: str, transcript: str, pincode: str = "",
                 steps.append({"node": node_name, "state": node_state})
                 final_state = {**final_state, **node_state}
 
-    # Strict execution timeout guard (12s)
     try:
         await asyncio.wait_for(_execute(), timeout=12.0)
     except asyncio.TimeoutError:
@@ -1180,10 +1187,12 @@ async def geocode_direct(req: GeocodeRequest):
     if local and local.get("confidence", 0) >= 0.35:
         return {"source": "local_db", "result": local}
 
-    osm_q = " ".join(req.landmarks[:2])
+    query_parts = [", ".join(req.landmarks)]
     for part in (req.city, req.state, req.country):
         if part:
-            osm_q += " " + part
+            query_parts.append(part)
+    osm_q = ", ".join(query_parts)
+
     osm = await _osm_search(osm_q, req.pincode, country="in")
     if osm:
         return {"source": "openstreetmap", "result": osm}
@@ -1226,12 +1235,12 @@ async def list_landmarks(state: str = "", city: str = ""):
         "count": len(rows),
         "landmarks": [
             {
-                "name":    r["landmark_name"],
-                "city":    r["city"],
-                "state":   r["state"],
-                "lat":     r["lat"],
-                "lng":     r["lng"],
-                "type":    r.get("landmark_type", ""),
+                "name":     r["landmark_name"],
+                "city":     r["city"],
+                "state":    r["state"],
+                "lat":      r["lat"],
+                "lng":      r["lng"],
+                "type":     r.get("landmark_type", ""),
                 "ambiguity_note": r.get("ambiguity_note", ""),
             }
             for r in rows
