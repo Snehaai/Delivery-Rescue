@@ -2,7 +2,7 @@
 =============================================================
   DELIVERY RESCUE BACKEND  —  Agentic AI Last-Mile System
 =============================================================
-  Stack  : FastAPI · LangGraph · Groq API (Llama 3) · Whisper · OSM
+  Stack  : FastAPI · LangGraph · Groq API (Llama 3) · Whisper · OSM · Twilio
   Author : Delivery Rescue Team
 =============================================================
 """
@@ -30,16 +30,61 @@ try:
     from dotenv import load_dotenv
     load_dotenv()
 except ImportError:
-    pass   # python-dotenv not installed — use OS env vars directly
+    pass
 
 # LangGraph
 from langgraph.graph import StateGraph, END
 
 # ──────────────────────────────────────────────────────────────
-#  LOGGING
+#  LOGGING & SECRET MASKING
 # ──────────────────────────────────────────────────────────────
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger(__name__)
+
+def mask_secrets(text: str) -> str:
+    """Utility to scrub sensitive environment variables and API keys from log strings."""
+    if not isinstance(text, str):
+        text = str(text)
+    for env_var in ["GROQ_API_KEY", "LOCATIONIQ_API_KEY", "TWILIO_AUTH_TOKEN", "TWILIO_ACCOUNT_SID"]:
+        secret_val = os.getenv(env_var, "")
+        if secret_val and len(secret_val) > 4:
+            text = text.replace(secret_val, f"{secret_val[:4]}...[REDACTED]")
+    return text
+
+# ──────────────────────────────────────────────────────────────
+#  CIRCUIT BREAKER IMPLEMENTATION FOR GROQ API
+# ──────────────────────────────────────────────────────────────
+class GroqCircuitBreaker:
+    def __init__(self, failure_threshold: int = 3, recovery_time: float = 60.0):
+        self.failure_threshold = failure_threshold
+        self.recovery_time = recovery_time
+        self.failure_count = 0
+        self.state = "CLOSED"  # CLOSED, OPEN
+
+        self.last_state_change = 0.0
+
+    def can_execute(self) -> bool:
+        if self.state == "OPEN":
+            if time.time() - self.last_state_change > self.recovery_time:
+                log.info("[CircuitBreaker] Entering HALF-OPEN state. Testing Groq API...")
+                return True
+            return False
+        return True
+
+    def record_success(self):
+        if self.state != "CLOSED":
+            log.info("[CircuitBreaker] Groq API recovered. Closing Circuit Breaker.")
+        self.failure_count = 0
+        self.state = "CLOSED"
+
+    def record_failure(self):
+        self.failure_count += 1
+        if self.failure_count >= self.failure_threshold:
+            self.state = "OPEN"
+            self.last_state_change = time.time()
+            log.warning(f"[CircuitBreaker] Groq API failed {self.failure_count} times. Opening breaker for {self.recovery_time}s.")
+
+groq_breaker = GroqCircuitBreaker()
 
 # ──────────────────────────────────────────────────────────────
 #  APP INIT
@@ -55,7 +100,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
 # Groq Client Initialization
 def get_groq():
     key = os.getenv("GROQ_API_KEY")
@@ -64,10 +108,10 @@ def get_groq():
     return Groq(api_key=key)
 
 # ──────────────────────────────────────────────────────────────
-#  LANDMARK DATABASE  (loaded from CSV at startup)
+#  LANDMARK DATABASE
 # ──────────────────────────────────────────────────────────────
 LANDMARK_CSV = Path(__file__).parent / "landmarks.csv"
-_landmark_index: list[dict] = []   # list of landmark dicts
+_landmark_index: list[dict] = []
 
 def load_landmarks() -> list[dict]:
     if not LANDMARK_CSV.exists():
@@ -277,12 +321,11 @@ async def _locationiq_search(query: str, pincode: str = "", country: str = "") -
             "osm_type": top.get("type", ""),
         }
     except Exception as e:
-        log.warning(f"LocationIQ search failed: {e}")
+        log.warning(f"LocationIQ search failed: {mask_secrets(str(e))}")
         return {}
 
 async def _osm_search(query: str, pincode: str = "", country: str = "in") -> dict:
-    country = "in"
-    liq = await _locationiq_search(query, pincode, country)
+    liq = await _locationiq_search(query, pincode, country="in")
     if liq:
         return liq
 
@@ -330,7 +373,7 @@ async def _osm_search(query: str, pincode: str = "", country: str = "in") -> dic
             "osm_type": top.get("type", ""),
         }
     except Exception as e:
-        log.warning(f"OSM search failed: {e}")
+        log.warning(f"OSM search failed: {mask_secrets(str(e))}")
         return {}
 
 # ──────────────────────────────────────────────────────────────
@@ -346,7 +389,7 @@ class RescueState(TypedDict):
     language:               str
 
     call_answered:          bool
-    fallback_triggered:      bool
+    fallback_triggered:     bool
     audio_transcript:       str
     noise_detected:         bool
     noise_cleaned:          bool
@@ -371,7 +414,7 @@ class RescueState(TypedDict):
     error_log:              list
 
 # ──────────────────────────────────────────────────────────────
-#  NODE 1  —  VOICE AGENT (USING GROQ LLAMA-3.1)
+#  NODE 1  —  VOICE AGENT (WITH CIRCUIT BREAKER + SECRET MASKING)
 # ──────────────────────────────────────────────────────────────
 async def voice_agent(state: RescueState) -> dict:
     updates: dict = {"status": "voice_processing"}
@@ -387,7 +430,7 @@ async def voice_agent(state: RescueState) -> dict:
     transcript = state.get("audio_transcript", "").strip()
     call_answered = state.get("call_answered", True)
 
-    # ── Handle no-answer scenario ──────────────────────────────
+  # ── Handle no-answer scenario ──────────────────────────────
     if not call_answered and not state.get("fallback_triggered"):
         updates["fallback_triggered"] = True
         updates["status_message"] = "📵 No answer. Sending WhatsApp voice note in local dialect..."
@@ -401,8 +444,7 @@ async def voice_agent(state: RescueState) -> dict:
             }
         updates["call_answered"] = True
         updates["status_message"] = "✅ Customer replied via WhatsApp."
-
-    # ── Noise detection and cleaning ───────────────────────────
+# ── Noise detection and cleaning ───────────────────────────
     noise_markers = ["[noise]", "[inaudible]", "[static]", "[background]", "..."]
     raw_noise = any(m in transcript.lower() for m in noise_markers)
 
@@ -420,7 +462,6 @@ async def voice_agent(state: RescueState) -> dict:
         updates["noise_detected"] = False
         updates["noise_cleaned"] = False
 
-    # Transcript too short even after cleaning
     if len(transcript.strip()) < 5:
         return {
             **updates,
@@ -432,7 +473,11 @@ async def voice_agent(state: RescueState) -> dict:
     updates["audio_transcript"] = transcript
     updates["status_message"] = "🧠 Extracting landmarks..."
 
-    # ── Groq LLM extraction ──────────────────────────────────
+    # ── Groq LLM extraction with Circuit Breaker ──────────────
+    if not groq_breaker.can_execute():
+        log.warning(f"[{state['order_id']}] Groq Circuit Breaker is OPEN. Bypassing LLM call.")
+        return _apply_keyword_fallback(state, updates, transcript, "Circuit Breaker OPEN")
+
     try:
         groq_client = get_groq()
         prompt = f"""You are a delivery address intelligence agent for last-mile e-commerce.
@@ -468,6 +513,8 @@ Return ONLY a valid JSON object, no markdown, no explanation:
         raw_resp = response.choices[0].message.content.strip()
         extracted = json.loads(raw_resp)
 
+        groq_breaker.record_success()
+
         landmarks   = extracted.get("landmarks", [])
         directions  = extracted.get("directions", [])
         identifiers = extracted.get("identifiers", [])
@@ -492,35 +539,38 @@ Return ONLY a valid JSON object, no markdown, no explanation:
             + (" | ⚠️ Clarification needed" if needs_clarif else "")
         )
 
-        if needs_clarif and state["retry_count"] < 2:
-            updates["status_message"] += f" — Will ask: '{extracted.get('clarification_question', '')}'"
-
         log.info(f"[{state['order_id']}] Groq LLM extraction OK: landmarks={landmarks}, conf_hint={conf_hint}")
 
     except Exception as e:
-        log.error(f"[{state['order_id']}] Groq LLM call failed: {e}. Using keyword fallback.")
-        kw_map = {
-            "mandir": "mandir", "masjid": "masjid", "school": "school",
-            "bhawan": "bhawan", "dukaan": "store", "station": "station",
-            "bazar": "bazar", "chowk": "chowk", "hospital": "hospital",
-            "thana": "police station", "panchayat": "panchayat bhawan",
-        }
-        found = []
-        for word in transcript.lower().split():
-            for kw, label in kw_map.items():
-                if kw in word and label not in found:
-                    found.append(label)
+        groq_breaker.record_failure()
+        safe_error = mask_secrets(str(e))
+        log.error(f"[{state['order_id']}] Groq LLM call failed: {safe_error}. Using keyword fallback.")
+        return _apply_keyword_fallback(state, updates, transcript, safe_error)
 
-        updates["extracted_landmarks"]   = found or [transcript[:60]]
-        updates["extracted_directions"]  = []
-        updates["extracted_identifiers"] = []
-        updates["inferred_city"]         = state.get("city_hint", "")
-        updates["state_hint"]            = state.get("state_hint", "")
-        updates["country_hint"]          = state.get("country_hint", "")
-        updates["extraction_confidence_hint"] = "low"
-        updates["status_message"]         = f"🔑 Keyword fallback used. Found: {found}"
-        updates["error_log"]              = state["error_log"] + [f"LLM error: {str(e)[:80]}"]
+    return updates
 
+def _apply_keyword_fallback(state: RescueState, updates: dict, transcript: str, err_msg: str) -> dict:
+    kw_map = {
+        "mandir": "mandir", "masjid": "masjid", "school": "school",
+        "bhawan": "bhawan", "dukaan": "store", "station": "station",
+        "bazar": "bazar", "chowk": "chowk", "hospital": "hospital",
+        "thana": "police station", "panchayat": "panchayat bhawan",
+    }
+    found = []
+    for word in transcript.lower().split():
+        for kw, label in kw_map.items():
+            if kw in word and label not in found:
+                found.append(label)
+
+    updates["extracted_landmarks"]   = found or [transcript[:60]]
+    updates["extracted_directions"]  = []
+    updates["extracted_identifiers"] = []
+    updates["inferred_city"]         = state.get("city_hint", "")
+    updates["state_hint"]            = state.get("state_hint", "")
+    updates["country_hint"]          = state.get("country_hint", "")
+    updates["extraction_confidence_hint"] = "low"
+    updates["status_message"]         = f"🔑 Keyword fallback used. Found: {found}"
+    updates["error_log"]              = state["error_log"] + [f"LLM error: {err_msg[:80]}"]
     return updates
 
 # ──────────────────────────────────────────────────────────────
@@ -564,7 +614,7 @@ async def spatial_agent(state: RescueState) -> dict:
             conf = min(conf, 0.72)
         if local_result.get("ambiguous"):
             conf = min(conf, 0.55)
-            reason = f"Ambiguous: {local_result.get('total_matches', '?')} candidates with similar names. {local_result.get('ambiguity_note', '')}"
+            reason = f"Ambiguous: {local_result.get('total_matches', '?')} candidates with similar names."
         else:
             reason = f"Local DB match: {local_result.get('display_name', '')} (raw score {local_result['confidence']:.0%})"
 
@@ -578,11 +628,7 @@ async def spatial_agent(state: RescueState) -> dict:
             "candidate_count":   local_result.get("total_matches", 1),
             "status_message":    f"📌 {local_result.get('display_name', 'Match found')} — {conf:.0%} confidence",
         })
-        log.info(f"[{state['order_id']}] Local DB match: conf={conf:.2f}, ambiguous={local_result.get('ambiguous')}")
         return updates
-
-    updates["status_message"] = "🌐 Local DB miss — querying OpenStreetMap..."
-    log.info(f"[{state['order_id']}] Local DB miss. Trying OSM for: {landmarks[:2]}")
 
     osm_query = " ".join(landmarks[:2])
     for part in (city, state_hint, country_hint):
@@ -602,7 +648,7 @@ async def spatial_agent(state: RescueState) -> dict:
         updates.update({
             "geocode_result":    osm_result,
             "confidence_score":  round(conf, 3),
-            "confidence_reason": f"OpenStreetMap fallback (importance-based score)",
+            "confidence_reason": f"OpenStreetMap fallback",
             "ambiguity_detected": osm_result.get("ambiguous", False),
             "candidate_count":   osm_result.get("total_matches", 1),
             "status_message":    f"🌐 OSM match: {osm_result.get('display_name','')[:60]} — {conf:.0%}",
@@ -616,8 +662,8 @@ async def spatial_agent(state: RescueState) -> dict:
         "confidence_reason": "No match in local DB or OSM",
         "ambiguity_detected": True,
         "candidate_count":   0,
-        "status_message":    "❓ Location not found. Will retry with more detail.",
-        "error_log":          state["error_log"] + ["Spatial: no result from DB or OSM"],
+        "status_message":    "❓ Location not found.",
+        "error_log":          state["error_log"] + ["Spatial: no result"],
     }
 
 # ──────────────────────────────────────────────────────────────
@@ -627,7 +673,6 @@ async def route_agent(state: RescueState) -> dict:
     score  = state.get("confidence_score", 0.0)
     geo    = state.get("geocode_result", {})
     retry  = state["retry_count"]
-    ambig  = state.get("ambiguity_detected", False)
 
     updates: dict = {"status": "route_processing"}
 
@@ -635,84 +680,74 @@ async def route_agent(state: RescueState) -> dict:
         return {
             **updates,
             "status": "escalated",
-            "status_message": "🧑‍💼 Max retries reached. Full context sent to human ops.",
+            "status_message": "🧑‍💼 Max retries reached. Context sent to human ops.",
             "action_taken": "escalate",
             "final_gps": {},
         }
 
     if score >= 0.75 and geo:
         final = {
-            "lat":                geo["lat"],
-            "lng":                geo["lng"],
-            "display_name":      geo.get("display_name", ""),
-            "confidence":        score,
-            "flagged_for_review": False,
-            "action":            "auto_push",
-            "source":            geo.get("source", ""),
+            "lat": geo["lat"], "lng": geo["lng"],
+            "display_name": geo.get("display_name", ""),
+            "confidence": score, "flagged_for_review": False,
+            "action": "auto_push", "source": geo.get("source", ""),
         }
-        log.info(f"[{state['order_id']}] AUTO-PUSH at {score:.0%}")
         return {
             **updates,
-            "status":         "resolved",
-            "status_message": f"✅ Auto-pushed GPS to driver app. ({score:.0%} confidence)",
-            "action_taken":   "auto_push",
-            "final_gps":      final,
+            "status": "resolved",
+            "status_message": f"✅ Auto-pushed GPS to driver app. ({score:.0%})",
+            "action_taken": "auto_push",
+            "final_gps": final,
         }
 
     if 0.50 <= score < 0.75 and geo:
         final = {
-            "lat":                geo["lat"],
-            "lng":                geo["lng"],
-            "display_name":      geo.get("display_name", ""),
-            "confidence":        score,
-            "flagged_for_review": True,
-            "action":            "push_flagged",
-            "source":            geo.get("source", ""),
-            "ambiguity_note":    geo.get("ambiguity_note", ""),
+            "lat": geo["lat"], "lng": geo["lng"],
+            "display_name": geo.get("display_name", ""),
+            "confidence": score, "flagged_for_review": True,
+            "action": "push_flagged", "source": geo.get("source", ""),
         }
-        log.info(f"[{state['order_id']}] PUSH+FLAG at {score:.0%}")
         return {
             **updates,
-            "status":         "resolved",
-            "status_message": f"⚠️ Pushed with caution flag ({score:.0%}). Ops will verify.",
-            "action_taken":   "push_flagged",
-            "final_gps":      final,
+            "status": "resolved",
+            "status_message": f"⚠️ Pushed with caution flag ({score:.0%}).",
+            "action_taken": "push_flagged",
+            "final_gps": final,
         }
 
     if retry < 3:
-        log.info(f"[{state['order_id']}] LOW conf {score:.0%} → retry {retry+1}")
         return {
             **updates,
-            "status":         "retrying",
-            "status_message": f"🔄 Confidence {score:.0%} too low. Asking customer for a more specific landmark...",
-            "action_taken":   "retry",
-            "retry_count":    retry + 1,
-            "final_gps":      {},
+            "status": "retrying",
+            "status_message": f"🔄 Confidence {score:.0%} low. Retrying...",
+            "action_taken": "retry",
+            "retry_count": retry + 1,
+            "final_gps": {},
         }
 
     return {
         **updates,
-        "status":         "escalated",
-        "status_message": "🧑‍💼 Could not resolve location. Escalating to human ops.",
-        "action_taken":   "escalate",
-        "final_gps":      {},
+        "status": "escalated",
+        "status_message": "🧑‍💼 Escalating to human ops.",
+        "action_taken": "escalate",
+        "final_gps": {},
     }
 
 # ──────────────────────────────────────────────────────────────
 #  NODE 4  —  ESCALATION NODE
 # ──────────────────────────────────────────────────────────────
 async def escalate_node(state: RescueState) -> dict:
-    log.warning(f"[{state['order_id']}] ESCALATED after {state['retry_count']} retries.")
     return {
-        "status":         "escalated",
-        "status_message": "🧑‍💼 Ticket created. Human ops team notified with full transcript.",
-        "action_taken":   "escalate",
-        "final_gps":      {},
+        "status": "escalated",
+        "status_message": "🧑‍💼 Ticket created. Human ops team notified.",
+        "action_taken": "escalate",
+        "final_gps": {},
     }
 
 # ──────────────────────────────────────────────────────────────
 #  CONDITIONAL EDGE — orchestrator routing logic
 # ──────────────────────────────────────────────────────────────
+
 def routing_decision(state: RescueState) -> str:
     action  = state.get("action_taken", "")
     status  = state.get("status", "")
@@ -720,13 +755,10 @@ def routing_decision(state: RescueState) -> str:
 
     if status in ("resolved",):
         return "end"
-
     if status == "escalated" or action == "escalate" or retry >= 3:
         return "escalate"
-
     if action == "retry" and retry < 3:
         return "retry_voice"
-
     return "end"
 
 # ──────────────────────────────────────────────────────────────
@@ -734,14 +766,12 @@ def routing_decision(state: RescueState) -> str:
 # ──────────────────────────────────────────────────────────────
 def build_graph() -> any:
     g = StateGraph(RescueState)
-
     g.add_node("voice_agent",   voice_agent)
     g.add_node("spatial_agent", spatial_agent)
     g.add_node("route_agent",   route_agent)
     g.add_node("escalate",      escalate_node)
 
     g.set_entry_point("voice_agent")
-
     g.add_edge("voice_agent",   "spatial_agent")
     g.add_edge("spatial_agent", "route_agent")
 
@@ -755,11 +785,51 @@ def build_graph() -> any:
         },
     )
     g.add_edge("escalate", END)
-
     return g.compile()
 
 rescue_graph = build_graph()
-log.info("LangGraph compiled successfully.")
+
+# ──────────────────────────────────────────────────────────────
+#  SHARED HELPER WITH REQUEST TIMEOUT ENFORCEMENT
+# ──────────────────────────────────────────────────────────────
+async def _run_full_rescue(order_id: str, transcript: str, pincode: str = "",
+                            city_hint: str = "", call_answered: bool = True,
+                            state_hint: str = "", country_hint: str = "") -> dict:
+    initial: RescueState = {
+        "order_id": order_id, "raw_address": transcript, "pincode": pincode,
+        "city_hint": city_hint, "state_hint": state_hint, "country_hint": country_hint,
+        "language": "auto", "call_answered": call_answered,
+        "fallback_triggered": False, "audio_transcript": transcript,
+        "noise_detected": False, "noise_cleaned": False, "extracted_landmarks": [],
+        "extracted_directions": [], "extracted_identifiers": [], "inferred_city": city_hint,
+        "geocode_result": {}, "confidence_score": 0.0, "confidence_reason": "",
+        "ambiguity_detected": False, "candidate_count": 0, "final_gps": {},
+        "action_taken": "", "retry_count": 0, "status": "pending",
+        "status_message": "Rescue initiated...", "error_log": [],
+    }
+
+    steps = []
+    final_state = initial
+
+    async def _execute():
+        nonlocal final_state
+        async for step in rescue_graph.astream(initial):
+            for node_name, node_state in step.items():
+                steps.append({"node": node_name, "state": node_state})
+                final_state = {**final_state, **node_state}
+
+    # Strict execution timeout guard (12s)
+    try:
+        await asyncio.wait_for(_execute(), timeout=12.0)
+    except asyncio.TimeoutError:
+        log.error(f"[{order_id}] Rescue execution timed out after 12s!")
+        final_state.update({
+            "status": "escalated",
+            "status_message": "⏱️ Request timed out. Escalating to human ops.",
+            "action_taken": "escalate"
+        })
+
+    return {"steps": steps, "final": final_state}
 
 # ──────────────────────────────────────────────────────────────
 #  WEBSOCKET ENDPOINT
@@ -821,9 +891,9 @@ async def rescue_ws(ws: WebSocket, order_id: str):
     except WebSocketDisconnect:
         log.info(f"[WS] Client disconnected: order={order_id}")
     except Exception as e:
-        log.error(f"[WS] Error for order={order_id}: {e}")
+        log.error(f"[WS] Error for order={order_id}: {mask_secrets(str(e))}")
         try:
-            await ws.send_json({"event": "error", "message": str(e)})
+            await ws.send_json({"event": "error", "message": mask_secrets(str(e))})
         except Exception:
             pass
 
@@ -875,8 +945,8 @@ async def transcribe_audio(audio: UploadFile = File(...)):
             "note":           "Install openai-whisper for real transcription",
         }
     except Exception as e:
-        log.error(f"Transcription error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        log.error(f"Transcription error: {mask_secrets(str(e))}")
+        raise HTTPException(status_code=500, detail=mask_secrets(str(e)))
 
 # ──────────────────────────────────────────────────────────────
 #  REST: MOCK CALL
@@ -907,39 +977,13 @@ async def mock_call(req: MockCallRequest):
     }
 
 # ──────────────────────────────────────────────────────────────
-#  SHARED HELPER — run full LangGraph
-# ──────────────────────────────────────────────────────────────
-async def _run_full_rescue(order_id: str, transcript: str, pincode: str = "",
-                            city_hint: str = "", call_answered: bool = True,
-                            state_hint: str = "", country_hint: str = "") -> dict:
-    initial: RescueState = {
-        "order_id": order_id, "raw_address": transcript, "pincode": pincode,
-        "city_hint": city_hint, "state_hint": state_hint, "country_hint": country_hint,
-        "language": "auto", "call_answered": call_answered,
-        "fallback_triggered": False, "audio_transcript": transcript,
-        "noise_detected": False, "noise_cleaned": False, "extracted_landmarks": [],
-        "extracted_directions": [], "extracted_identifiers": [], "inferred_city": city_hint,
-        "geocode_result": {}, "confidence_score": 0.0, "confidence_reason": "",
-        "ambiguity_detected": False, "candidate_count": 0, "final_gps": {},
-        "action_taken": "", "retry_count": 0, "status": "pending",
-        "status_message": "Rescue initiated...", "error_log": [],
-    }
-    steps = []
-    final_state = initial
-    async for step in rescue_graph.astream(initial):
-        for node_name, node_state in step.items():
-            steps.append({"node": node_name, "state": node_state})
-            final_state = {**final_state, **node_state}
-    return {"steps": steps, "final": final_state}
-
-# ──────────────────────────────────────────────────────────────
 #  REST: MANUAL RESCUE
 # ──────────────────────────────────────────────────────────────
 class ManualRescueRequest(BaseModel):
-    order_id:  str
+    order_id:   str
     transcript: str
-    pincode:   str = ""
-    city_hint: str = ""
+    pincode:    str = ""
+    city_hint:  str = ""
     state_hint: str = ""
     country_hint: str = ""
 
@@ -985,7 +1029,7 @@ class TwilioCallRequest(BaseModel):
 async def twilio_status():
     return {"configured": _twilio_env_ok(),
             "missing": [k for k in ("TWILIO_ACCOUNT_SID", "TWILIO_AUTH_TOKEN",
-                                     "TWILIO_PHONE_NUMBER", "PUBLIC_BASE_URL")
+                                    "TWILIO_PHONE_NUMBER", "PUBLIC_BASE_URL")
                         if not os.environ.get(k)]}
 
 @app.post("/api/twilio/call")
@@ -993,7 +1037,7 @@ async def twilio_call(req: TwilioCallRequest):
     if not _twilio_env_ok():
         raise HTTPException(status_code=400, detail=(
             "Twilio not configured. Set TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, "
-            "TWILIO_PHONE_NUMBER, and PUBLIC_BASE_URL (your ngrok https URL). See README."
+            "TWILIO_PHONE_NUMBER, and PUBLIC_BASE_URL (your ngrok https URL)."
         ))
     try:
         client = _get_twilio_client()
@@ -1016,8 +1060,8 @@ async def twilio_call(req: TwilioCallRequest):
         log.info(f"[Twilio] Call placed: sid={call.sid} to={req.to}")
         return {"call_sid": call.sid, "status": "calling"}
     except Exception as e:
-        log.error(f"[Twilio] Call failed: {e}")
-        raise HTTPException(status_code=500, detail=f"Twilio call failed: {e}")
+        log.error(f"[Twilio] Call failed: {mask_secrets(str(e))}")
+        raise HTTPException(status_code=500, detail=f"Twilio call failed: {mask_secrets(str(e))}")
 
 @app.post("/api/twilio/twiml")
 async def twilio_twiml():
@@ -1027,8 +1071,8 @@ async def twilio_twiml():
 <Response>
   <Say language="hi-IN">Namaste. Kripya apna pura pata, landmark ke saath, batayein.</Say>
   <Record maxLength="30" playBeep="true" trim="trim-silence"
-          recordingStatusCallback="{base}/api/twilio/recording-status"
-          recordingStatusCallbackMethod="POST" />
+         recordingStatusCallback="{base}/api/twilio/recording-status"
+         recordingStatusCallbackMethod="POST" />
   <Say language="hi-IN">Dhanyavaad. Aapka pata process ho raha hai.</Say>
 </Response>"""
     return Response(content=twiml, media_type="application/xml")
@@ -1111,8 +1155,8 @@ async def _process_twilio_recording(call_sid: str, recording_url: str):
         log.info(f"[Twilio] Call {call_sid} processed. Final status: {run['final'].get('status')}")
 
     except Exception as e:
-        log.error(f"[Twilio] Processing failed for {call_sid}: {e}")
-        publish(status="error", error=str(e))
+        log.error(f"[Twilio] Processing failed for {call_sid}: {mask_secrets(str(e))}")
+        publish(status="error", error=mask_secrets(str(e)))
 
 @app.get("/api/twilio/result/{call_sid}")
 async def twilio_result(call_sid: str):
@@ -1155,6 +1199,7 @@ async def health():
         "status":            "ok",
         "landmarks_loaded":  len(_landmark_index),
         "groq_key_set":      bool(os.environ.get("GROQ_API_KEY")),
+        "circuit_breaker":   groq_breaker.state,
         "graph_nodes":       ["voice_agent", "spatial_agent", "route_agent", "escalate"],
         "osm_enabled":       True,
         "whisper_available": _check_whisper(),
@@ -1196,6 +1241,8 @@ async def list_landmarks(state: str = "", city: str = ""):
 @app.get("/", response_class=HTMLResponse)
 def read_root():
     html_path = os.path.join(os.path.dirname(__file__), "index.html")
+    if not os.path.exists(html_path):
+        return HTMLResponse("<h1>Delivery Rescue API Backend Running</h1>", status_code=200)
     with open(html_path, "r", encoding="utf-8") as f:
         html_content = f.read()
     return HTMLResponse(content=html_content, status_code=200)
@@ -1203,14 +1250,7 @@ def read_root():
 # ──────────────────────────────────────────────────────────────
 #  ENTRY POINT
 # ──────────────────────────────────────────────────────────────
-import uvicorn
-
 if __name__ == "__main__":
+    import uvicorn
     port = int(os.environ.get("PORT", 8000))
-    uvicorn.run(
-        "backend:app",
-        host="0.0.0.0",
-        port=port,
-        reload=False,
-        log_level="info",
-    )
+    uvicorn.run("backend:app", host="0.0.0.0", port=port, reload=False, log_level="info")
